@@ -144,6 +144,7 @@ struct BreezeASRCLI {
             globalTempo: options.globalTempo,
             trimSilence: options.trimSilence,
             stretchVideo: options.stretchVideo,
+            hardwareVideoEncode: options.hardwareVideoEncode,
             ttsEngine: options.ttsEngine,
             cloudVoice: options.cloudVoice,
             quiet: options.quiet
@@ -249,6 +250,9 @@ struct BreezeASRCLI {
                                    locked (output video ends up a little longer). Uses --speed if given.
           --no-stretch-video       Disable the default stretch; fall back to sequential placement
                                    (or --uniform-speed for constant-speed anchoring).
+          --sw-encode              (stretch-video) Re-encode with libx264 instead of the default
+                                   VideoToolbox hardware encoder — slower, marginally higher quality.
+                                   (Other modes stream-copy the video and never re-encode.)
           --uniform-speed          One global tempo, every cue anchored to its own start time
                                    (constant speed, zero drift, video length unchanged; the tightest
                                    lines may locally overlap the next cue — those are reported).
@@ -351,6 +355,7 @@ struct DubOptions: Sendable {
     var globalTempo: Double?
     var trimSilence = true
     var stretchVideo = true                           // default timeline mode on this branch
+    var hardwareVideoEncode = true                    // stretch re-encode via VideoToolbox by default
     var ttsEngine: TTSEngine = .cloud                 // default on this branch: cloud edge-tts
     var cloudVoice: String = Defaults.cloudVoice
     var quiet = false
@@ -439,6 +444,7 @@ struct DubOptions: Sendable {
             case "--no-stretch-video":
                 stretchVideo = false
                 stretchExplicit = true
+            case "--sw-encode":      hardwareVideoEncode = false
             case "--no-trim-silence": trimSilence = false
             case "--speed":
                 guard let v = Double(try value()), v >= 0.5, v <= 3.0 else {

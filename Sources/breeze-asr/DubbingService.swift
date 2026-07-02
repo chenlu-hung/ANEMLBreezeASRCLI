@@ -23,6 +23,7 @@ struct DubbingService {
         var globalTempo: Double?        // explicit uniform tempo; nil = auto-fit to the video length
         var trimSilence: Bool           // strip indextts2's leading/trailing silence before placing
         var stretchVideo: Bool          // freeze/extend the video at dense cues so natural-speed dub fits
+        var hardwareVideoEncode: Bool   // stretch re-encode: true = VideoToolbox HW (fast), false = libx264
         var ttsEngine: TTSEngine        // .cloud (edge-tts, fixed natural voice) or .local (indextts2 clone)
         var cloudVoice: String          // edge-tts voice id used by the cloud engine
         var quiet: Bool
@@ -429,15 +430,25 @@ struct DubbingService {
         parts.append("\(concatIns)concat=n=\(n):v=1:a=0[v]")
         let filter = parts.joined(separator: ";")
 
-        log("Assembling stretched video (\(n) segments)…")
+        // The stretch path is the only one that re-encodes video (the tpad/concat graph can't be
+        // stream-copied). Default to Apple-silicon hardware H.264 (VideoToolbox): constant-quality
+        // (-q:v, resolution-independent) at a few minutes instead of libx264's tens of minutes on a
+        // long 1080p60 lecture. `--sw-encode` forces libx264 for marginally higher quality.
+        let encoderArgs: [String]
+        if config.hardwareVideoEncode {
+            encoderArgs = ["-c:v", "h264_videotoolbox", "-q:v", "65", "-allow_sw", "1",
+                           "-profile:v", "high", "-pix_fmt", "yuv420p"]
+        } else {
+            encoderArgs = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+        }
+        log("Assembling stretched video (\(n) segments, "
+            + "\(config.hardwareVideoEncode ? "VideoToolbox HW" : "libx264"))…")
         try await ffmpeg.run([
             "-i", source.path,
             "-filter_complex", filter,
             "-map", "[v]", "-an",
-            "-r", "60", "-fps_mode", "cfr",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-y", output.path
-        ])
+            "-r", "60", "-fps_mode", "cfr"
+        ] + encoderArgs + ["-y", output.path])
     }
 
     // MARK: - Clip preprocessing

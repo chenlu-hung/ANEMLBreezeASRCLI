@@ -23,6 +23,9 @@ Re-run `/project-map update` after substantial changes.
 - **Dub timeline default = `--stretch-video`** (dub at natural speed, freeze-extend the video at
   dense cues so nothing overlaps; output ends up slightly longer). `--no-stretch-video` falls back to
   sequential; `--uniform-speed`/`--speed` switch to constant-speed anchoring (and override the default).
+- **Stretch is the only mode that re-encodes video**; it defaults to the **VideoToolbox hardware
+  encoder** (`h264_videotoolbox -q:v 65`) so a long 1080p60 re-encode takes minutes, not tens of
+  minutes. `--sw-encode` forces libx264 (slower, marginally higher quality). Other modes `-c:v copy`.
 - **Voice cloning is opt-in**: `--clone` (or passing `--ref`) switches to the local indextts2-mlx
   CLI, which clones the original speaker. That path needs a built indextts2-mlx (defaults follow a
   `../indextts2-mlx/` sibling-repo layout, overridable via `--indextts2` / `--model`).
