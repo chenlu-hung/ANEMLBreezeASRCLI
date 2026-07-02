@@ -1,5 +1,6 @@
 import Foundation
 import SwiftSubtitles
+import SwiftEdgeTTS
 
 /// Generates a time-aligned English dub from a translated SRT and muxes it back into
 /// the source video. Per-cue speech is synthesised by the external `indextts2` CLI
@@ -22,6 +23,9 @@ struct DubbingService {
         var globalTempo: Double?        // explicit uniform tempo; nil = auto-fit to the video length
         var trimSilence: Bool           // strip indextts2's leading/trailing silence before placing
         var stretchVideo: Bool          // freeze/extend the video at dense cues so natural-speed dub fits
+        var hardwareVideoEncode: Bool   // stretch re-encode: true = VideoToolbox HW (fast), false = libx264
+        var ttsEngine: TTSEngine        // .cloud (edge-tts, fixed natural voice) or .local (indextts2 clone)
+        var cloudVoice: String          // edge-tts voice id used by the cloud engine
         var quiet: Bool
     }
 
@@ -53,7 +57,10 @@ struct DubbingService {
 
         let videoDuration = try await ffmpeg.getVideoDuration(url: videoURL)
 
-        // 1. Synthesise (or reuse) one clip per cue. indextts2 names them <stem>_<NNN>.wav.
+        let srtStem = srtURL.deletingPathExtension().lastPathComponent
+
+        // 1. Synthesise (or reuse) one clip per cue, named <stem>_<NNN>.wav so both engines and
+        //    the reuse path feed identical files into every downstream stage.
         let clipDir: URL
         if let reuse = config.reuseWavDir {
             clipDir = reuse
@@ -62,14 +69,19 @@ struct DubbingService {
             clipDir = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("breeze-dub-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: clipDir, withIntermediateDirectories: true)
-            // Voice reference: an explicit --ref wins; otherwise clone the original speaker by
-            // pulling a clip straight out of the source video's audio.
-            let ref = try await resolveReference(cues: cues, video: videoURL,
-                                                 videoDuration: videoDuration, into: clipDir)
-            try await synthesise(srt: srtURL, ref: ref, into: clipDir)
+            switch config.ttsEngine {
+            case .cloud:
+                // Cloud TTS (edge-tts): a fixed, natural neural voice — no cloning, so nothing is
+                // extracted from the video and indextts2 need not be installed.
+                try await synthesiseCloud(cues: cues, srtStem: srtStem, into: clipDir)
+            case .local:
+                // Local TTS (indextts2): clone the original speaker. An explicit --ref wins;
+                // otherwise pull a reference clip straight out of the source video's audio.
+                let ref = try await resolveReference(cues: cues, video: videoURL,
+                                                     videoDuration: videoDuration, into: clipDir)
+                try await synthesise(srt: srtURL, ref: ref, into: clipDir)
+            }
         }
-
-        let srtStem = srtURL.deletingPathExtension().lastPathComponent
 
         // 2. Gather every cue that has a clip, with its synthesised length, in start order.
         //    indextts2 pads each clip with ~0.3–0.4s of leading/trailing silence; left in, that
@@ -256,6 +268,73 @@ struct DubbingService {
         }
     }
 
+    // MARK: - Cloud TTS (edge-tts, native)
+
+    /// Synthesise one clip per cue with edge-tts (Microsoft neural voices) via the pure-Swift
+    /// SwiftEdgeTTS client — a fixed, natural voice, no cloning, no Python and no external binary.
+    /// Each cue is spoken at its natural rate (the timeline stage applies any speed-up) and written
+    /// as <stem>_<NNN>.wav (mono 22.05 kHz pcm) so cloud and indextts2 clips are byte-format-
+    /// identical from here on. Cloud synthesis needs an internet connection.
+    private func synthesiseCloud(cues: [Subtitles.Cue], srtStem: String, into dir: URL) async throws {
+        let edge = EdgeTTSService()
+        let ordered = cues.sorted { $0.startTimeInSeconds < $1.startTimeInSeconds }
+        log("Synthesising \(ordered.count) dub clips with edge-tts (voice \(config.cloudVoice))…")
+        var done = 0
+        for cue in ordered {
+            guard let position = cue.position else { continue }
+            // SRT text can span several lines; flatten it to a single spoken string.
+            let text = cue.text
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                log("  ⚠️  cue \(position): empty text — skipping")
+                continue
+            }
+            // edge-tts emits mp3; transcode to the pipeline's wav format so trimming/placement
+            // treat cloud and local clips identically.
+            let mp3 = dir.appendingPathComponent(String(format: "%@_%03d.mp3", srtStem, position))
+            try await synthesiseCue(edge, text: text, out: mp3)
+            let wav = dir.appendingPathComponent(String(format: "%@_%03d.wav", srtStem, position))
+            try await ffmpeg.run(["-i", mp3.path, "-ar", "22050", "-ac", "1",
+                                  "-c:a", "pcm_s16le", "-y", wav.path])
+            try? FileManager.default.removeItem(at: mp3)
+            done += 1
+            if !config.quiet {
+                FileHandle.standardError.write(Data("\r  [edge-tts] \(done)/\(ordered.count)   ".utf8))
+            }
+        }
+        if !config.quiet { FileHandle.standardError.write(Data("\n".utf8)) }
+        guard done > 0 else { throw CLIError("edge-tts produced no clips (all cues empty?).") }
+    }
+
+    /// Synthesise a single cue via SwiftEdgeTTS, writing an mp3 to `out`. The Microsoft endpoint
+    /// intermittently returns no audio (and occasionally rate-limits); left unhandled, one such
+    /// blip aborts a whole multi-hundred-cue dub. So retry a few times with a short backoff, and
+    /// treat a zero-byte result as a failure too.
+    private func synthesiseCue(_ edge: EdgeTTSService, text: String, out: URL) async throws {
+        let maxAttempts = 4
+        var lastError: Error?
+        for attempt in 1...maxAttempts {
+            do {
+                _ = try await edge.synthesize(text: text, voice: config.cloudVoice, outputURL: out)
+                let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)??.intValue ?? 0
+                if size > 0 { return }
+                lastError = CLIError("edge-tts returned an empty audio file")
+            } catch {
+                lastError = error
+            }
+            try? FileManager.default.removeItem(at: out)
+            if attempt < maxAttempts {
+                log("  ⚠️  edge-tts attempt \(attempt)/\(maxAttempts) failed, retrying…")
+                try await Task.sleep(nanoseconds: UInt64(attempt) * 700_000_000)
+            }
+        }
+        throw CLIError("edge-tts failed after \(maxAttempts) attempts: "
+            + "\(lastError.map { String(describing: $0) } ?? "unknown error")\n"
+            + "  (Cloud TTS needs an internet connection; the Microsoft endpoint also rate-limits — "
+            + "if this persists, retry later.)")
+    }
+
     // MARK: - Elastic timeline (stretch video to fit a natural-speed dub)
 
     /// One slice of the rebuilt timeline: the original video window `[origStart, origEnd)` held
@@ -351,15 +430,25 @@ struct DubbingService {
         parts.append("\(concatIns)concat=n=\(n):v=1:a=0[v]")
         let filter = parts.joined(separator: ";")
 
-        log("Assembling stretched video (\(n) segments)…")
+        // The stretch path is the only one that re-encodes video (the tpad/concat graph can't be
+        // stream-copied). Default to Apple-silicon hardware H.264 (VideoToolbox): constant-quality
+        // (-q:v, resolution-independent) at a few minutes instead of libx264's tens of minutes on a
+        // long 1080p60 lecture. `--sw-encode` forces libx264 for marginally higher quality.
+        let encoderArgs: [String]
+        if config.hardwareVideoEncode {
+            encoderArgs = ["-c:v", "h264_videotoolbox", "-q:v", "65", "-allow_sw", "1",
+                           "-profile:v", "high", "-pix_fmt", "yuv420p"]
+        } else {
+            encoderArgs = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+        }
+        log("Assembling stretched video (\(n) segments, "
+            + "\(config.hardwareVideoEncode ? "VideoToolbox HW" : "libx264"))…")
         try await ffmpeg.run([
             "-i", source.path,
             "-filter_complex", filter,
             "-map", "[v]", "-an",
-            "-r", "60", "-fps_mode", "cfr",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-y", output.path
-        ])
+            "-r", "60", "-fps_mode", "cfr"
+        ] + encoderArgs + ["-y", output.path])
     }
 
     // MARK: - Clip preprocessing

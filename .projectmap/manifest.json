@@ -1,17 +1,17 @@
 {
-  "generated": "2026-06-30T14:22:47+00:00",
+  "generated": "2026-07-02T13:22:27+00:00",
   "mode": "update",
   "depth": 2,
-  "source": "walk",
+  "source": "git",
   "files": 7,
   "modules": {
     "(root)": {
-      "hash": "35b8501a41f9e9ccc6ece761baba0dec2e4f07ca2af1838ea224e65d38b7399c",
+      "hash": "8914ddcfbff42c33c3751d4fdbb3c1082ed9303607eaca068a5366b76c868d67",
       "files": 1,
       "doc": "modules/_root.md"
     },
     "Sources/breeze-asr": {
-      "hash": "534948e833bf7319da1bae79ac8091c86c3f84e38a2c8f06a2fc029cd94cd5ef",
+      "hash": "3c176d9dc1f7572254cf68ea73709eae6b3cdcbe80ecd397e98a38b376ca05f2",
       "files": 6,
       "doc": "modules/Sources__breeze-asr.md"
     }
