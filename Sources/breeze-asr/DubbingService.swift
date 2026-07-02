@@ -1,5 +1,6 @@
 import Foundation
 import SwiftSubtitles
+import SwiftEdgeTTS
 
 /// Generates a time-aligned English dub from a translated SRT and muxes it back into
 /// the source video. Per-cue speech is synthesised by the external `indextts2` CLI
@@ -24,7 +25,6 @@ struct DubbingService {
         var stretchVideo: Bool          // freeze/extend the video at dense cues so natural-speed dub fits
         var ttsEngine: TTSEngine        // .cloud (edge-tts, fixed natural voice) or .local (indextts2 clone)
         var cloudVoice: String          // edge-tts voice id used by the cloud engine
-        var cloudTTSCommand: String     // edge-tts executable name/path used by the cloud engine
         var quiet: Bool
     }
 
@@ -267,26 +267,21 @@ struct DubbingService {
         }
     }
 
-    // MARK: - Cloud TTS (edge-tts)
+    // MARK: - Cloud TTS (edge-tts, native)
 
-    /// Synthesise one clip per cue with edge-tts (Microsoft neural voices) — a fixed, natural
-    /// voice, no cloning. Each cue is spoken at its natural rate (the timeline stage applies any
-    /// speed-up) and written as <stem>_<NNN>.wav (mono 22.05 kHz pcm) so cloud and indextts2
-    /// clips are byte-format-identical from here on. Cloud synthesis needs an internet connection.
+    /// Synthesise one clip per cue with edge-tts (Microsoft neural voices) via the pure-Swift
+    /// SwiftEdgeTTS client — a fixed, natural voice, no cloning, no Python and no external binary.
+    /// Each cue is spoken at its natural rate (the timeline stage applies any speed-up) and written
+    /// as <stem>_<NNN>.wav (mono 22.05 kHz pcm) so cloud and indextts2 clips are byte-format-
+    /// identical from here on. Cloud synthesis needs an internet connection.
     private func synthesiseCloud(cues: [Subtitles.Cue], srtStem: String, into dir: URL) async throws {
-        guard let edgeBin = Self.resolveOnPath(config.cloudTTSCommand) else {
-            throw CLIError("""
-            edge-tts not found (looked for '\(config.cloudTTSCommand)' on PATH).
-              Install it:  pipx install edge-tts   (or: pip install edge-tts)
-              Then retry, or pass --edge-tts <path> to the binary.
-            """)
-        }
+        let edge = EdgeTTSService()
         let ordered = cues.sorted { $0.startTimeInSeconds < $1.startTimeInSeconds }
         log("Synthesising \(ordered.count) dub clips with edge-tts (voice \(config.cloudVoice))…")
         var done = 0
         for cue in ordered {
             guard let position = cue.position else { continue }
-            // SRT text can span several lines; edge-tts takes one --text argument, so flatten it.
+            // SRT text can span several lines; flatten it to a single spoken string.
             let text = cue.text
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -297,7 +292,7 @@ struct DubbingService {
             // edge-tts emits mp3; transcode to the pipeline's wav format so trimming/placement
             // treat cloud and local clips identically.
             let mp3 = dir.appendingPathComponent(String(format: "%@_%03d.mp3", srtStem, position))
-            try await runEdgeTTS(binary: edgeBin, text: text, out: mp3)
+            try await synthesiseCue(edge, text: text, out: mp3)
             let wav = dir.appendingPathComponent(String(format: "%@_%03d.wav", srtStem, position))
             try await ffmpeg.run(["-i", mp3.path, "-ar", "22050", "-ac", "1",
                                   "-c:a", "pcm_s16le", "-y", wav.path])
@@ -311,54 +306,32 @@ struct DubbingService {
         guard done > 0 else { throw CLIError("edge-tts produced no clips (all cues empty?).") }
     }
 
-    /// Run edge-tts for a single cue at its natural rate, writing an mp3 to `out`. The Microsoft
-    /// endpoint intermittently returns `NoAudioReceived` (and occasionally rate-limits); left
-    /// unhandled, one such blip aborts a whole multi-hundred-cue dub. So retry a few times with a
-    /// short backoff, and treat an exit-0-but-empty file as a failure too.
-    private func runEdgeTTS(binary: URL, text: String, out: URL) async throws {
+    /// Synthesise a single cue via SwiftEdgeTTS, writing an mp3 to `out`. The Microsoft endpoint
+    /// intermittently returns no audio (and occasionally rate-limits); left unhandled, one such
+    /// blip aborts a whole multi-hundred-cue dub. So retry a few times with a short backoff, and
+    /// treat a zero-byte result as a failure too.
+    private func synthesiseCue(_ edge: EdgeTTSService, text: String, out: URL) async throws {
         let maxAttempts = 4
-        var lastErr = ""
+        var lastError: Error?
         for attempt in 1...maxAttempts {
-            let process = Process()
-            process.executableURL = binary
-            process.arguments = ["--voice", config.cloudVoice, "--text", text,
-                                 "--write-media", out.path]
-            let errPipe = Pipe()
-            process.standardError = errPipe
-            process.standardOutput = Pipe()   // edge-tts prints cue metadata to stdout; discard it
-            try process.run()
-            process.waitUntilExit()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)??.intValue ?? 0
-            if process.terminationStatus == 0 && size > 0 { return }
-
-            lastErr = String(data: errData, encoding: .utf8) ?? ""
+            do {
+                _ = try await edge.synthesize(text: text, voice: config.cloudVoice, outputURL: out)
+                let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)??.intValue ?? 0
+                if size > 0 { return }
+                lastError = CLIError("edge-tts returned an empty audio file")
+            } catch {
+                lastError = error
+            }
             try? FileManager.default.removeItem(at: out)
             if attempt < maxAttempts {
                 log("  ⚠️  edge-tts attempt \(attempt)/\(maxAttempts) failed, retrying…")
                 try await Task.sleep(nanoseconds: UInt64(attempt) * 700_000_000)
             }
         }
-        throw CLIError("edge-tts failed after \(maxAttempts) attempts. "
-            + "\(lastErr.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+        throw CLIError("edge-tts failed after \(maxAttempts) attempts: "
+            + "\(lastError.map { String(describing: $0) } ?? "unknown error")\n"
             + "  (Cloud TTS needs an internet connection; the Microsoft endpoint also rate-limits — "
             + "if this persists, retry later.)")
-    }
-
-    /// Resolve a command to an executable URL: an explicit path (contains '/') is used as-is;
-    /// a bare name is searched on PATH. Returns nil when nothing executable is found.
-    static func resolveOnPath(_ command: String) -> URL? {
-        if command.contains("/") {
-            let u = URL(fileURLWithPath: command)
-            return FileManager.default.isExecutableFile(atPath: u.path) ? u : nil
-        }
-        let path = ProcessInfo.processInfo.environment["PATH"]
-            ?? "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
-        for dir in path.split(separator: ":") {
-            let u = URL(fileURLWithPath: String(dir)).appendingPathComponent(command)
-            if FileManager.default.isExecutableFile(atPath: u.path) { return u }
-        }
-        return nil
     }
 
     // MARK: - Elastic timeline (stretch video to fit a natural-speed dub)

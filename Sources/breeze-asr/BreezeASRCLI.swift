@@ -146,7 +146,6 @@ struct BreezeASRCLI {
             stretchVideo: options.stretchVideo,
             ttsEngine: options.ttsEngine,
             cloudVoice: options.cloudVoice,
-            cloudTTSCommand: options.cloudTTSCommand,
             quiet: options.quiet
         )
         let service = DubbingService(ffmpeg: ffmpeg, config: config)
@@ -218,13 +217,11 @@ struct BreezeASRCLI {
           <video>                  Source video to dub (FFmpeg-readable)
 
         TTS ENGINE:
-          Default: cloud edge-tts — a fixed, natural neural voice (free, no cloning). Pass
-          --clone (or --ref) to voice-clone the original speaker with local indextts2 instead.
+          Default: cloud edge-tts — a fixed, natural neural voice (free, no cloning), built in
+          via the native SwiftEdgeTTS client (no Python, no external binary; needs internet).
+          Pass --clone (or --ref) to voice-clone the original speaker with local indextts2 instead.
           --tts <cloud|local>      Force the engine (default: cloud)
-          --voice <id>             Cloud voice id (default: \(defaults.cloudVoice)).
-                                   List with:  edge-tts --list-voices | grep zh-TW
-          --edge-tts <path>        edge-tts executable (default: '\(defaults.edgeTTS)', found on PATH).
-                                   Install: pipx install edge-tts  (or: pip install edge-tts)
+          --voice <id>             Cloud voice id (default: \(defaults.cloudVoice), 雲哲 zh-TW male)
 
         OPTIONS:
           --srt <path>             (required) Translated SRT to voice
@@ -353,14 +350,12 @@ struct DubOptions: Sendable {
     var stretchVideo = false
     var ttsEngine: TTSEngine = .cloud                 // default on this branch: cloud edge-tts
     var cloudVoice: String = Defaults.cloudVoice
-    var cloudTTSCommand: String = Defaults.edgeTTS
     var quiet = false
 
     enum Defaults {
         static let binary = "../indextts2-mlx/.build/xcode/Build/Products/Debug/indextts2"
         static let model = "../indextts2-mlx/models/mlx-indextts2-standard-8bit"
         static let cloudVoice = "zh-TW-YunJheNeural"  // 雲哲, zh-TW male neural voice
-        static let edgeTTS = "edge-tts"
         static let maxSpeedupValue = 1.5
         static var maxSpeedup: String { String(maxSpeedupValue) }
         static let diffusionStepsValue = 20
@@ -398,7 +393,6 @@ struct DubOptions: Sendable {
                 ttsEngine = .local          // clone the original speaker via indextts2
                 engineExplicit = true
             case "--voice":          cloudVoice = try value()
-            case "--edge-tts":       cloudTTSCommand = try value()
             case "--ref":
                 ref = try value()
                 if !engineExplicit { ttsEngine = .local }   // a voice reference implies cloning
