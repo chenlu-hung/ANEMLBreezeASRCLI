@@ -1,0 +1,19 @@
+{
+  "generated": "2026-06-30T14:22:47+00:00",
+  "mode": "update",
+  "depth": 2,
+  "source": "walk",
+  "files": 7,
+  "modules": {
+    "(root)": {
+      "hash": "35b8501a41f9e9ccc6ece761baba0dec2e4f07ca2af1838ea224e65d38b7399c",
+      "files": 1,
+      "doc": "modules/_root.md"
+    },
+    "Sources/breeze-asr": {
+      "hash": "534948e833bf7319da1bae79ac8091c86c3f84e38a2c8f06a2fc029cd94cd5ef",
+      "files": 6,
+      "doc": "modules/Sources__breeze-asr.md"
+    }
+  }
+}
