@@ -144,6 +144,9 @@ struct BreezeASRCLI {
             globalTempo: options.globalTempo,
             trimSilence: options.trimSilence,
             stretchVideo: options.stretchVideo,
+            ttsEngine: options.ttsEngine,
+            cloudVoice: options.cloudVoice,
+            cloudTTSCommand: options.cloudTTSCommand,
             quiet: options.quiet
         )
         let service = DubbingService(ffmpeg: ffmpeg, config: config)
@@ -214,20 +217,30 @@ struct BreezeASRCLI {
         ARGUMENTS:
           <video>                  Source video to dub (FFmpeg-readable)
 
+        TTS ENGINE:
+          Default: cloud edge-tts — a fixed, natural neural voice (free, no cloning). Pass
+          --clone (or --ref) to voice-clone the original speaker with local indextts2 instead.
+          --tts <cloud|local>      Force the engine (default: cloud)
+          --voice <id>             Cloud voice id (default: \(defaults.cloudVoice)).
+                                   List with:  edge-tts --list-voices | grep zh-TW
+          --edge-tts <path>        edge-tts executable (default: '\(defaults.edgeTTS)', found on PATH).
+                                   Install: pipx install edge-tts  (or: pip install edge-tts)
+
         OPTIONS:
           --srt <path>             (required) Translated SRT to voice
-          --ref <wav>              Voice reference for cloning. Default: extract one straight
-                                   from the source video (clone the original speaker).
-          --ref-start <sec>        Start of the auto-extracted reference clip
+          --clone                  Clone the original speaker (switches to local indextts2)
+          --ref <wav>              Voice reference for cloning (implies --clone). Default when
+                                   cloning: extract one from the source video.
+          --ref-start <sec>        (clone) Start of the auto-extracted reference clip
                                    (default: the first cue's start)
-          --ref-duration <sec>     Length of the auto-extracted reference clip
+          --ref-duration <sec>     (clone) Length of the auto-extracted reference clip
                                    (default: \(defaults.refDuration))
-          --indextts2 <path>       indextts2 binary
+          --indextts2 <path>       (clone) indextts2 binary
                                    (default: \(defaults.binary))
-          --model <dir>            indextts2 model dir
+          --model <dir>            (clone) indextts2 model dir
                                    (default: \(defaults.model))
-          --preproc-dir <dir>      indextts2 preprocessing weights dir (optional)
-          --steps <n>              indextts2 diffusion steps per cue (1–100, default \(defaults.diffusionSteps)).
+          --preproc-dir <dir>      (clone) indextts2 preprocessing weights dir (optional)
+          --steps <n>              (clone) indextts2 diffusion steps per cue (1–100, default \(defaults.diffusionSteps)).
                                    Fewer steps synthesise faster with slightly lower quality;
                                    the engine's own default is 25.
           -o, --output <path>      Output video (default: <video>.dubbed.mp4)
@@ -257,6 +270,12 @@ struct BreezeASRCLI {
 }
 
 struct CLIError: Error { let message: String; init(_ m: String) { message = m } }
+
+/// Which TTS engine `dub` uses to voice each cue.
+enum TTSEngine: String, Sendable {
+    case cloud   // edge-tts (Microsoft neural voices): free, natural, fixed voice — no cloning
+    case local   // indextts2-mlx: clones the original speaker's voice from a reference clip
+}
 
 struct Options: Sendable {
     let input: URL
@@ -332,11 +351,16 @@ struct DubOptions: Sendable {
     var globalTempo: Double?
     var trimSilence = true
     var stretchVideo = false
+    var ttsEngine: TTSEngine = .cloud                 // default on this branch: cloud edge-tts
+    var cloudVoice: String = Defaults.cloudVoice
+    var cloudTTSCommand: String = Defaults.edgeTTS
     var quiet = false
 
     enum Defaults {
         static let binary = "../indextts2-mlx/.build/xcode/Build/Products/Debug/indextts2"
         static let model = "../indextts2-mlx/models/mlx-indextts2-standard-8bit"
+        static let cloudVoice = "zh-TW-YunJheNeural"  // 雲哲, zh-TW male neural voice
+        static let edgeTTS = "edge-tts"
         static let maxSpeedupValue = 1.5
         static var maxSpeedup: String { String(maxSpeedupValue) }
         static let diffusionStepsValue = 20
@@ -351,6 +375,7 @@ struct DubOptions: Sendable {
         var ref: String?
         var binary = Defaults.binary
         var model = Defaults.model
+        var engineExplicit = false   // true once --tts/--clone pins the engine
 
         var i = 0
         while i < args.count {
@@ -362,7 +387,21 @@ struct DubOptions: Sendable {
             }
             switch arg {
             case "--srt":            srt = try value()
-            case "--ref":            ref = try value()
+            case "--tts":
+                let v = try value().lowercased()
+                guard let e = TTSEngine(rawValue: v) else {
+                    throw CLIError("--tts must be 'cloud' (edge-tts) or 'local' (indextts2)")
+                }
+                ttsEngine = e
+                engineExplicit = true
+            case "--clone":
+                ttsEngine = .local          // clone the original speaker via indextts2
+                engineExplicit = true
+            case "--voice":          cloudVoice = try value()
+            case "--edge-tts":       cloudTTSCommand = try value()
+            case "--ref":
+                ref = try value()
+                if !engineExplicit { ttsEngine = .local }   // a voice reference implies cloning
             case "--ref-start":
                 guard let v = Double(try value()), v >= 0 else {
                     throw CLIError("--ref-start must be a non-negative time in seconds")

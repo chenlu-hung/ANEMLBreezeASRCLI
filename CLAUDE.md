@@ -14,16 +14,24 @@ Re-run `/project-map update` after substantial changes.
 - Test: `swift test` — **no test target is defined yet**, so this is currently a no-op.
 - Transcribe: `breeze-asr <input> [-l zh] [-o out.srt]`
 - Dub: `breeze-asr dub <video> --srt <translated.srt> [-o out.mp4]`
-- Requires FFmpeg on PATH (`brew install ffmpeg`); `dub` also needs a built indextts2-mlx CLI
-  (defaults follow a `../indextts2-mlx/` sibling-repo layout, overridable via `--indextts2` / `--model`).
+- Requires FFmpeg on PATH (`brew install ffmpeg`).
+- **Dub TTS default = cloud edge-tts** (Microsoft neural voices; free, natural, *no* cloning).
+  Needs `edge-tts` on PATH (`pipx install edge-tts`) and an internet connection. Default voice
+  `zh-TW-YunJheNeural` (雲哲, male); pick another with `--voice`.
+- **Voice cloning is opt-in**: `--clone` (or passing `--ref`) switches to the local indextts2-mlx
+  CLI, which clones the original speaker. That path needs a built indextts2-mlx (defaults follow a
+  `../indextts2-mlx/` sibling-repo layout, overridable via `--indextts2` / `--model`).
 
 ## Architecture
 Single executable target (`Sources/breeze-asr`), thin `@main` entry delegating to focused services:
 - **Transcribe path**: `FFmpegService` (extract 16 kHz mono WAV) → `WhisperKitService`
   (Breeze-ASR-25 via WhisperKit, VAD chunking) → `SubtitleService` (write SRT).
-- **Dub path** (`dub` subcommand): `DubbingService` extracts a voice reference from the source
-  video (or `--ref`) → drives the external indextts2 CLI for per-cue speech → places clips on the
-  timeline (sequential / uniform-speed / stretch-video modes) → muxes with FFmpeg.
+- **Dub path** (`dub` subcommand): `DubbingService` synthesises per-cue speech — by default via the
+  cloud **edge-tts** engine (`synthesiseCloud`, fixed neural voice, no reference), or via the local
+  **indextts2** CLI when `--clone`/`--ref` is given (`resolveReference` from the source video →
+  `synthesise`). Either way clips are named `<stem>_<NNN>.wav`, then placed on the timeline
+  (sequential / uniform-speed / stretch-video modes) and muxed with FFmpeg. edge-tts is called
+  once per cue with a few retries (the endpoint intermittently returns `NoAudioReceived`).
 - This tool is **ASR-only**: subtitle correction and translation are deliberately left to an
   external LLM step — don't add them here.
 

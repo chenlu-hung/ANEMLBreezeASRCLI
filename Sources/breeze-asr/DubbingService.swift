@@ -22,6 +22,9 @@ struct DubbingService {
         var globalTempo: Double?        // explicit uniform tempo; nil = auto-fit to the video length
         var trimSilence: Bool           // strip indextts2's leading/trailing silence before placing
         var stretchVideo: Bool          // freeze/extend the video at dense cues so natural-speed dub fits
+        var ttsEngine: TTSEngine        // .cloud (edge-tts, fixed natural voice) or .local (indextts2 clone)
+        var cloudVoice: String          // edge-tts voice id used by the cloud engine
+        var cloudTTSCommand: String     // edge-tts executable name/path used by the cloud engine
         var quiet: Bool
     }
 
@@ -53,7 +56,10 @@ struct DubbingService {
 
         let videoDuration = try await ffmpeg.getVideoDuration(url: videoURL)
 
-        // 1. Synthesise (or reuse) one clip per cue. indextts2 names them <stem>_<NNN>.wav.
+        let srtStem = srtURL.deletingPathExtension().lastPathComponent
+
+        // 1. Synthesise (or reuse) one clip per cue, named <stem>_<NNN>.wav so both engines and
+        //    the reuse path feed identical files into every downstream stage.
         let clipDir: URL
         if let reuse = config.reuseWavDir {
             clipDir = reuse
@@ -62,14 +68,19 @@ struct DubbingService {
             clipDir = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("breeze-dub-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: clipDir, withIntermediateDirectories: true)
-            // Voice reference: an explicit --ref wins; otherwise clone the original speaker by
-            // pulling a clip straight out of the source video's audio.
-            let ref = try await resolveReference(cues: cues, video: videoURL,
-                                                 videoDuration: videoDuration, into: clipDir)
-            try await synthesise(srt: srtURL, ref: ref, into: clipDir)
+            switch config.ttsEngine {
+            case .cloud:
+                // Cloud TTS (edge-tts): a fixed, natural neural voice — no cloning, so nothing is
+                // extracted from the video and indextts2 need not be installed.
+                try await synthesiseCloud(cues: cues, srtStem: srtStem, into: clipDir)
+            case .local:
+                // Local TTS (indextts2): clone the original speaker. An explicit --ref wins;
+                // otherwise pull a reference clip straight out of the source video's audio.
+                let ref = try await resolveReference(cues: cues, video: videoURL,
+                                                     videoDuration: videoDuration, into: clipDir)
+                try await synthesise(srt: srtURL, ref: ref, into: clipDir)
+            }
         }
-
-        let srtStem = srtURL.deletingPathExtension().lastPathComponent
 
         // 2. Gather every cue that has a clip, with its synthesised length, in start order.
         //    indextts2 pads each clip with ~0.3–0.4s of leading/trailing silence; left in, that
@@ -254,6 +265,100 @@ struct DubbingService {
         guard process.terminationStatus == 0 else {
             throw CLIError("indextts2 exited with status \(process.terminationStatus)")
         }
+    }
+
+    // MARK: - Cloud TTS (edge-tts)
+
+    /// Synthesise one clip per cue with edge-tts (Microsoft neural voices) — a fixed, natural
+    /// voice, no cloning. Each cue is spoken at its natural rate (the timeline stage applies any
+    /// speed-up) and written as <stem>_<NNN>.wav (mono 22.05 kHz pcm) so cloud and indextts2
+    /// clips are byte-format-identical from here on. Cloud synthesis needs an internet connection.
+    private func synthesiseCloud(cues: [Subtitles.Cue], srtStem: String, into dir: URL) async throws {
+        guard let edgeBin = Self.resolveOnPath(config.cloudTTSCommand) else {
+            throw CLIError("""
+            edge-tts not found (looked for '\(config.cloudTTSCommand)' on PATH).
+              Install it:  pipx install edge-tts   (or: pip install edge-tts)
+              Then retry, or pass --edge-tts <path> to the binary.
+            """)
+        }
+        let ordered = cues.sorted { $0.startTimeInSeconds < $1.startTimeInSeconds }
+        log("Synthesising \(ordered.count) dub clips with edge-tts (voice \(config.cloudVoice))…")
+        var done = 0
+        for cue in ordered {
+            guard let position = cue.position else { continue }
+            // SRT text can span several lines; edge-tts takes one --text argument, so flatten it.
+            let text = cue.text
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                log("  ⚠️  cue \(position): empty text — skipping")
+                continue
+            }
+            // edge-tts emits mp3; transcode to the pipeline's wav format so trimming/placement
+            // treat cloud and local clips identically.
+            let mp3 = dir.appendingPathComponent(String(format: "%@_%03d.mp3", srtStem, position))
+            try await runEdgeTTS(binary: edgeBin, text: text, out: mp3)
+            let wav = dir.appendingPathComponent(String(format: "%@_%03d.wav", srtStem, position))
+            try await ffmpeg.run(["-i", mp3.path, "-ar", "22050", "-ac", "1",
+                                  "-c:a", "pcm_s16le", "-y", wav.path])
+            try? FileManager.default.removeItem(at: mp3)
+            done += 1
+            if !config.quiet {
+                FileHandle.standardError.write(Data("\r  [edge-tts] \(done)/\(ordered.count)   ".utf8))
+            }
+        }
+        if !config.quiet { FileHandle.standardError.write(Data("\n".utf8)) }
+        guard done > 0 else { throw CLIError("edge-tts produced no clips (all cues empty?).") }
+    }
+
+    /// Run edge-tts for a single cue at its natural rate, writing an mp3 to `out`. The Microsoft
+    /// endpoint intermittently returns `NoAudioReceived` (and occasionally rate-limits); left
+    /// unhandled, one such blip aborts a whole multi-hundred-cue dub. So retry a few times with a
+    /// short backoff, and treat an exit-0-but-empty file as a failure too.
+    private func runEdgeTTS(binary: URL, text: String, out: URL) async throws {
+        let maxAttempts = 4
+        var lastErr = ""
+        for attempt in 1...maxAttempts {
+            let process = Process()
+            process.executableURL = binary
+            process.arguments = ["--voice", config.cloudVoice, "--text", text,
+                                 "--write-media", out.path]
+            let errPipe = Pipe()
+            process.standardError = errPipe
+            process.standardOutput = Pipe()   // edge-tts prints cue metadata to stdout; discard it
+            try process.run()
+            process.waitUntilExit()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)??.intValue ?? 0
+            if process.terminationStatus == 0 && size > 0 { return }
+
+            lastErr = String(data: errData, encoding: .utf8) ?? ""
+            try? FileManager.default.removeItem(at: out)
+            if attempt < maxAttempts {
+                log("  ⚠️  edge-tts attempt \(attempt)/\(maxAttempts) failed, retrying…")
+                try await Task.sleep(nanoseconds: UInt64(attempt) * 700_000_000)
+            }
+        }
+        throw CLIError("edge-tts failed after \(maxAttempts) attempts. "
+            + "\(lastErr.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+            + "  (Cloud TTS needs an internet connection; the Microsoft endpoint also rate-limits — "
+            + "if this persists, retry later.)")
+    }
+
+    /// Resolve a command to an executable URL: an explicit path (contains '/') is used as-is;
+    /// a bare name is searched on PATH. Returns nil when nothing executable is found.
+    static func resolveOnPath(_ command: String) -> URL? {
+        if command.contains("/") {
+            let u = URL(fileURLWithPath: command)
+            return FileManager.default.isExecutableFile(atPath: u.path) ? u : nil
+        }
+        let path = ProcessInfo.processInfo.environment["PATH"]
+            ?? "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+        for dir in path.split(separator: ":") {
+            let u = URL(fileURLWithPath: String(dir)).appendingPathComponent(command)
+            if FileManager.default.isExecutableFile(atPath: u.path) { return u }
+        }
+        return nil
     }
 
     // MARK: - Elastic timeline (stretch video to fit a natural-speed dub)
