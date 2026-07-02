@@ -7,10 +7,13 @@ while the main thread stays in `dispatchMain()` — required so CoreML/ANE compl
 serviced and the model load doesn't deadlock. The transcription path is `FFmpegService`
 (extract 16 kHz mono WAV) → `WhisperKitService` (Breeze-ASR-25 with VAD chunking, model-cache
 resolution) → `SubtitleService` (write SRT via SwiftSubtitles), with `SupportedLanguage`
-mapping language codes to Whisper. The `dub` path is `DubbingService`: it extracts a voice
-reference from the source video (or takes `--ref`), drives the external indextts2 CLI for
-per-cue speech, then places clips on the timeline (sequential / uniform-speed / stretch-video
-modes) and muxes the result with FFmpeg.
+mapping language codes to Whisper. The `dub` path is `DubbingService`: by default it
+synthesises per-cue speech via the cloud edge-tts engine (`synthesiseCloud`/`synthesiseCue`
+using the native SwiftEdgeTTS package, fixed neural voice, no cloning), or — when
+`--clone`/`--ref` is given — extracts a voice reference and drives the external indextts2 CLI
+(`synthesise`). It then places clips on the timeline (default stretch-video, plus sequential /
+uniform-speed) and muxes the result with FFmpeg; stretch-video is the only mode that
+re-encodes (VideoToolbox hardware encoder by default).
 
 <!-- projectmap:auto:start (generated — do not edit by hand) -->
 ## Files (6)
@@ -21,38 +24,41 @@ modes) and muxes the result with FFmpeg.
 - `Sources/breeze-asr/SupportedLanguage.swift`
 - `Sources/breeze-asr/WhisperKitService.swift`
 
-## Public symbols (54)
+## Public symbols (57)
 - `struct BreezeASRCLI` — Sources/breeze-asr/BreezeASRCLI.swift:11
 - `function main` — Sources/breeze-asr/BreezeASRCLI.swift:16
 - `function run` — Sources/breeze-asr/BreezeASRCLI.swift:63
 - `function runDub` — Sources/breeze-asr/BreezeASRCLI.swift:114
-- `function log` — Sources/breeze-asr/BreezeASRCLI.swift:158
-- `function logDone` — Sources/breeze-asr/BreezeASRCLI.swift:163
-- `function progressBar` — Sources/breeze-asr/BreezeASRCLI.swift:168
-- `function printUsage` — Sources/breeze-asr/BreezeASRCLI.swift:174
-- `function printDubUsage` — Sources/breeze-asr/BreezeASRCLI.swift:206
-- `struct CLIError` — Sources/breeze-asr/BreezeASRCLI.swift:259
-- `struct Options` — Sources/breeze-asr/BreezeASRCLI.swift:261
-- `struct DubOptions` — Sources/breeze-asr/BreezeASRCLI.swift:317
-- `enum Defaults` — Sources/breeze-asr/BreezeASRCLI.swift:337
-- `function value` — Sources/breeze-asr/BreezeASRCLI.swift:358
-- `function absolute` — Sources/breeze-asr/BreezeASRCLI.swift:427
-- `struct DubbingService` — Sources/breeze-asr/DubbingService.swift:9
-- `struct Config` — Sources/breeze-asr/DubbingService.swift:10
-- `struct Placement` — Sources/breeze-asr/DubbingService.swift:32
-- `function dub` — Sources/breeze-asr/DubbingService.swift:49
-- `function resolveReference` — Sources/breeze-asr/DubbingService.swift:194
-- `function synthesise` — Sources/breeze-asr/DubbingService.swift:216
-- `struct Segment` — Sources/breeze-asr/DubbingService.swift:263
-- `function dubWithStretchedVideo` — Sources/breeze-asr/DubbingService.swift:276
-- `function buildStretchedVideo` — Sources/breeze-asr/DubbingService.swift:336
-- `function trimSilence` — Sources/breeze-asr/DubbingService.swift:370
-- `function atempoChain` — Sources/breeze-asr/DubbingService.swift:388
-- `function buildDubTrack` — Sources/breeze-asr/DubbingService.swift:402
-- `function mux` — Sources/breeze-asr/DubbingService.swift:435
-- `function reportTimeline` — Sources/breeze-asr/DubbingService.swift:458
-- `function log` — Sources/breeze-asr/DubbingService.swift:490
-- `function fmt` — Sources/breeze-asr/DubbingService.swift:495
+- `function log` — Sources/breeze-asr/BreezeASRCLI.swift:161
+- `function logDone` — Sources/breeze-asr/BreezeASRCLI.swift:166
+- `function progressBar` — Sources/breeze-asr/BreezeASRCLI.swift:171
+- `function printUsage` — Sources/breeze-asr/BreezeASRCLI.swift:177
+- `function printDubUsage` — Sources/breeze-asr/BreezeASRCLI.swift:209
+- `struct CLIError` — Sources/breeze-asr/BreezeASRCLI.swift:276
+- `enum TTSEngine` — Sources/breeze-asr/BreezeASRCLI.swift:279
+- `struct Options` — Sources/breeze-asr/BreezeASRCLI.swift:284
+- `struct DubOptions` — Sources/breeze-asr/BreezeASRCLI.swift:340
+- `enum Defaults` — Sources/breeze-asr/BreezeASRCLI.swift:363
+- `function value` — Sources/breeze-asr/BreezeASRCLI.swift:387
+- `function absolute` — Sources/breeze-asr/BreezeASRCLI.swift:478
+- `struct DubbingService` — Sources/breeze-asr/DubbingService.swift:10
+- `struct Config` — Sources/breeze-asr/DubbingService.swift:11
+- `struct Placement` — Sources/breeze-asr/DubbingService.swift:36
+- `function dub` — Sources/breeze-asr/DubbingService.swift:53
+- `function resolveReference` — Sources/breeze-asr/DubbingService.swift:206
+- `function synthesise` — Sources/breeze-asr/DubbingService.swift:228
+- `function synthesiseCloud` — Sources/breeze-asr/DubbingService.swift:278
+- `function synthesiseCue` — Sources/breeze-asr/DubbingService.swift:314
+- `struct Segment` — Sources/breeze-asr/DubbingService.swift:342
+- `function dubWithStretchedVideo` — Sources/breeze-asr/DubbingService.swift:355
+- `function buildStretchedVideo` — Sources/breeze-asr/DubbingService.swift:415
+- `function trimSilence` — Sources/breeze-asr/DubbingService.swift:459
+- `function atempoChain` — Sources/breeze-asr/DubbingService.swift:477
+- `function buildDubTrack` — Sources/breeze-asr/DubbingService.swift:491
+- `function mux` — Sources/breeze-asr/DubbingService.swift:524
+- `function reportTimeline` — Sources/breeze-asr/DubbingService.swift:547
+- `function log` — Sources/breeze-asr/DubbingService.swift:579
+- `function fmt` — Sources/breeze-asr/DubbingService.swift:584
 - `enum FFmpegError` — Sources/breeze-asr/FFmpegService.swift:3
 - `class FFmpegService` — Sources/breeze-asr/FFmpegService.swift:24
 - `function findFFmpeg` — Sources/breeze-asr/FFmpegService.swift:31
@@ -81,6 +87,7 @@ modes) and muxes the result with FFmpeg.
 - `CoreML`
 - `Foundation`
 - `Hub`
+- `SwiftEdgeTTS`
 - `SwiftSubtitles`
 - `WhisperKit`
 <!-- projectmap:auto:end -->
