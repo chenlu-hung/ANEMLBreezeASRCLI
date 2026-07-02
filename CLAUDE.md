@@ -17,8 +17,12 @@ Re-run `/project-map update` after substantial changes.
 - Requires FFmpeg on PATH (`brew install ffmpeg`).
 - **Dub TTS default = cloud edge-tts** (Microsoft neural voices; free, natural, *no* cloning).
   Built in via the pure-Swift `SwiftEdgeTTS` SPM dependency — **no Python, no external binary**;
-  just needs an internet connection. Default voice `zh-TW-YunJheNeural` (雲哲, male); pick another
-  with `--voice`.
+  just needs an internet connection. Default voice `en-US-AndrewMultilingualNeural` (natural en-US
+  male — the repo mainly dubs *to English*); pick another with `--voice` (e.g. `zh-TW-YunJheNeural`
+  雲哲 for a Chinese dub).
+- **Dub timeline default = `--stretch-video`** (dub at natural speed, freeze-extend the video at
+  dense cues so nothing overlaps; output ends up slightly longer). `--no-stretch-video` falls back to
+  sequential; `--uniform-speed`/`--speed` switch to constant-speed anchoring (and override the default).
 - **Voice cloning is opt-in**: `--clone` (or passing `--ref`) switches to the local indextts2-mlx
   CLI, which clones the original speaker. That path needs a built indextts2-mlx (defaults follow a
   `../indextts2-mlx/` sibling-repo layout, overridable via `--indextts2` / `--model`).
@@ -31,9 +35,9 @@ Single executable target (`Sources/breeze-asr`), thin `@main` entry delegating t
   cloud **edge-tts** engine (`synthesiseCloud` → `synthesiseCue`, using the native `SwiftEdgeTTS`
   package; fixed neural voice, no reference), or via the local **indextts2** CLI when `--clone`/`--ref`
   is given (`resolveReference` from the source video → `synthesise`). Either way clips are named
-  `<stem>_<NNN>.wav`, then placed on the timeline (sequential / uniform-speed / stretch-video modes)
-  and muxed with FFmpeg. Each edge-tts cue is retried a few times (the endpoint intermittently
-  returns no audio).
+  `<stem>_<NNN>.wav`, then placed on the timeline (default **stretch-video**; also sequential /
+  uniform-speed) and muxed with FFmpeg. Each edge-tts cue is retried a few times (the endpoint
+  intermittently returns no audio).
 - This tool is **ASR-only**: subtitle correction and translation are deliberately left to an
   external LLM step — don't add them here.
 

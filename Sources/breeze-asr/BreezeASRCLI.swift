@@ -221,7 +221,8 @@ struct BreezeASRCLI {
           via the native SwiftEdgeTTS client (no Python, no external binary; needs internet).
           Pass --clone (or --ref) to voice-clone the original speaker with local indextts2 instead.
           --tts <cloud|local>      Force the engine (default: cloud)
-          --voice <id>             Cloud voice id (default: \(defaults.cloudVoice), 雲哲 zh-TW male)
+          --voice <id>             Cloud voice id (default: \(defaults.cloudVoice), natural en-US
+                                   male). For a Chinese dub use e.g. zh-TW-YunJheNeural (雲哲).
 
         OPTIONS:
           --srt <path>             (required) Translated SRT to voice
@@ -243,14 +244,16 @@ struct BreezeASRCLI {
           -o, --output <path>      Output video (default: <video>.dubbed.mp4)
           --max-speedup <f>        (sequential mode) Max atempo to fit a clip into its slot
                                    (1.0–2.0, default \(defaults.maxSpeedup))
-          --uniform-speed          One global tempo for the whole video, every cue anchored to
-                                   its own start time (constant speed, zero drift; the tightest
-                                   lines may overlap the next cue — those are reported)
-          --speed <f>              Force the global tempo (0.5–3.0); implies --uniform-speed.
-                                   Without it, --uniform-speed auto-fits the video length.
-          --stretch-video          Keep the dub at natural speed and instead freeze-extend the
+          --stretch-video          (default) Keep the dub at natural speed and freeze-extend the
                                    video at dense cues so nothing overlaps and audio/video stay
-                                   locked (output video is a little longer). Uses --speed if given.
+                                   locked (output video ends up a little longer). Uses --speed if given.
+          --no-stretch-video       Disable the default stretch; fall back to sequential placement
+                                   (or --uniform-speed for constant-speed anchoring).
+          --uniform-speed          One global tempo, every cue anchored to its own start time
+                                   (constant speed, zero drift, video length unchanged; the tightest
+                                   lines may locally overlap the next cue — those are reported).
+          --speed <f>              Force the global tempo (0.5–3.0). Selects --uniform-speed unless
+                                   --stretch-video is also given (then it's the natural playback rate).
           --no-trim-silence        Keep indextts2's leading/trailing clip silence
                                    (default: trim it, for tighter onset sync and less speed-up)
           --keep-original <vol>    Keep original audio at this volume under the dub
@@ -347,7 +350,7 @@ struct DubOptions: Sendable {
     var uniformSpeed = false
     var globalTempo: Double?
     var trimSilence = true
-    var stretchVideo = false
+    var stretchVideo = true                           // default timeline mode on this branch
     var ttsEngine: TTSEngine = .cloud                 // default on this branch: cloud edge-tts
     var cloudVoice: String = Defaults.cloudVoice
     var quiet = false
@@ -355,7 +358,7 @@ struct DubOptions: Sendable {
     enum Defaults {
         static let binary = "../indextts2-mlx/.build/xcode/Build/Products/Debug/indextts2"
         static let model = "../indextts2-mlx/models/mlx-indextts2-standard-8bit"
-        static let cloudVoice = "zh-TW-YunJheNeural"  // 雲哲, zh-TW male neural voice
+        static let cloudVoice = "en-US-AndrewMultilingualNeural"  // natural en-US male (repo mainly dubs to English)
         static let maxSpeedupValue = 1.5
         static var maxSpeedup: String { String(maxSpeedupValue) }
         static let diffusionStepsValue = 20
@@ -370,7 +373,8 @@ struct DubOptions: Sendable {
         var ref: String?
         var binary = Defaults.binary
         var model = Defaults.model
-        var engineExplicit = false   // true once --tts/--clone pins the engine
+        var engineExplicit = false    // true once --tts/--clone pins the engine
+        var stretchExplicit = false   // true once --stretch-video/--no-stretch-video is given
 
         var i = 0
         while i < args.count {
@@ -426,15 +430,23 @@ struct DubOptions: Sendable {
                 }
                 keepOriginalVolume = v
             case "--wav-dir":        reuseWavDir = DubOptions.absolute(try value(), isDirectory: true)
-            case "--uniform-speed":  uniformSpeed = true
-            case "--stretch-video":  stretchVideo = true
+            case "--uniform-speed":
+                uniformSpeed = true
+                if !stretchExplicit { stretchVideo = false }   // uniform overrides the default stretch
+            case "--stretch-video":
+                stretchVideo = true
+                stretchExplicit = true
+            case "--no-stretch-video":
+                stretchVideo = false
+                stretchExplicit = true
             case "--no-trim-silence": trimSilence = false
             case "--speed":
                 guard let v = Double(try value()), v >= 0.5, v <= 3.0 else {
                     throw CLIError("--speed must be between 0.5 and 3.0")
                 }
                 globalTempo = v
-                uniformSpeed = true   // an explicit global tempo implies uniform mode
+                uniformSpeed = true                            // an explicit global tempo implies uniform mode
+                if !stretchExplicit { stretchVideo = false }
             case "-q", "--quiet":    quiet = true
             default:
                 if arg.hasPrefix("-") { throw CLIError("Unknown option: \(arg)") }
