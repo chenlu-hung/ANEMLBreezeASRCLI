@@ -22,6 +22,36 @@ video/audio → breeze-asr CLI (FFmpeg + Breeze-ASR-25) → raw.srt
   ANEMLBreezeASR/VibeTyping cache — no download if either app already has it.
 - Safety-net script: `/Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py`.
 
+## Multiple files: serialize the ASR step
+
+When the user gives **more than one** input file, run the ASR (breeze-asr CLI) step
+**one file at a time, sequentially** — never launch multiple `breeze-asr` processes in
+parallel. The CLI shares a single ANE compiler cache and the Apple Neural Engine is
+effectively serial for this model; concurrent instances contend for the ANE and can stall,
+slow down, or deadlock each other. The LLM correction/translation step is cheap by
+comparison and may be pipelined (see below), but the ASR call itself must be strictly
+serial.
+
+**Pattern:**
+```
+for file in files:
+    run breeze-asr on file (wait for completion before the next)
+    → the LLM correction subagent for this file may be launched once ASR is done
+```
+
+A reasonable efficient ordering that stays ASR-serial:
+1. Start `breeze-asr` on file 1; wait for its raw SRT.
+2. As soon as file 1's raw SRT exists, you *may* hand it to an opencode subagent for
+   correction while `breeze-asr` on file 2 runs — the subagent is CPU/GPU on the LLM
+   side and does NOT touch the ANE, so it does not compete with the CLI.
+3. Continue staggering: each file's ASR runs only after the previous file's ASR
+   finished. Correction/translation subagents can overlap with the *next* file's ASR.
+4. Do `srt_tool.py reattach` for each file as its corrected SRT arrives.
+
+If in doubt, the simplest correct behavior is fully sequential: ASR → correct → reattach
+→ (translate → reattach) → next file. This is always safe; the staggered variant is only
+an optimization.
+
 ## Workflow
 
 1. **Transcribe.** Run the CLI; capture stdout (the SRT path). `-l` is the source
@@ -30,6 +60,9 @@ video/audio → breeze-asr CLI (FFmpeg + Breeze-ASR-25) → raw.srt
    breeze-asr "<input>" -l <lang> -o "<workdir>/raw.srt"
    ```
    Heavy step — if it may exceed a couple of minutes, run it in the background and poll.
+   **For multiple input files, run this step strictly one at a time** — see
+   "Multiple files: serialize the ASR step" above. Do NOT launch parallel `breeze-asr`
+   instances; they compete for the ANE and can deadlock.
 
 2. **Auto-correct (default ON).** Use the **dispatch skill** to send a self-contained
    brief to **opencode** to context-correct (按照上下文校正) `raw.srt` into `corrected.srt`,
