@@ -146,3 +146,9 @@ branch only.
 - **Model re-downloads despite VibeTyping having it**: the cache must match the canonical
   `models/aoiandroid/Breeze-ASR-25_coreml/` layout with a real (>100 MB) AudioEncoder.
 - **Empty/garbled transcription**: pass the correct `-l` source language instead of `auto`.
+- **Multiple files competing for the ANE**: never run more than one `breeze-asr` process
+  at a time. The Apple Neural Engine is effectively serial for this model — concurrent
+  instances contend for the same ANE compiler cache and compute units, and can stall,
+  slow down, or deadlock each other. Process input files sequentially at the ASR step;
+  the LLM correction/translation subagent is CPU/cloud-side and may overlap with the
+  *next* file's ASR, but never run two `breeze-asr` in parallel.
