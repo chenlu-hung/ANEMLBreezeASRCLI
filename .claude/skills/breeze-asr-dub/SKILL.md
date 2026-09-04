@@ -46,7 +46,8 @@ video → breeze-asr CLI → raw.srt
    ```
    Tune `--max-gap` / `--max-dur` / `--max-chars` if lines are still too fragmented.
 
-3. **Auto-correct.** Dispatch to opencode with the correction prompt (same verbatim
+3. **Auto-correct.** Also the step that adds punctuation — the ASR model emits none.
+   Dispatch to opencode with the correction prompt (same verbatim
    constraint as breeze-asr-subtitle: 由你直接動手，禁止撰寫程式或呼叫外部 API; full prompt
    → [REFERENCE.md](../breeze-asr-subtitle/REFERENCE.md#dispatching-correction-to-opencode)),
    input `merged.srt` → `corrected_llm.srt`. Then lock timings **against `merged.srt`**

@@ -40,11 +40,21 @@ with its own model, NOT write a script or call an external API. Keep that line v
 
 規則：保持完全相同的字幕條目數量與順序，不要合併、拆分、增加或刪除任何條目；
 每條的編號與「HH:MM:SS,mmm --> HH:MM:SS,mmm」時間軸原樣保留，只改文字行；
+原始辨識結果完全沒有標點，請補上（，。？！等全形標點，依台灣用法）；
+一句話跨多條 cue 時，標點依語意落點，不要因為 cue 結束就硬加句號；
 輸出純 SRT，不要加說明或 markdown 程式碼框。
 ```
 
 Timestamps are re-asserted afterward by `srt_tool.py reattach`, so even if opencode
 slips, timing stays correct. What matters is that text stays aligned 1:1 by position.
+
+The punctuation rule is not optional polish. Breeze-ASR-25 emits none at all — its
+Mandarin fine-tuning data is synthetic speech whose transcripts carry none, which trains
+the behaviour out of the underlying Whisper-large-v2 — so `raw.srt` arrives as a bare
+character stream and this correction pass is the only step that can put punctuation back.
+The cross-cue clause matters because cues are split on the recogniser's segment
+boundaries, not on sentence boundaries: a model told simply to "add punctuation" tends to
+close every cue with a full stop and chop sentences in half.
 
 ## Dispatching translation to opencode
 

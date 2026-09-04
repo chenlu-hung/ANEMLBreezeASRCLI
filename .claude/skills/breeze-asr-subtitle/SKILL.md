@@ -66,9 +66,11 @@ an optimization.
 
 2. **Auto-correct (default ON).** Use the **dispatch skill** to send a self-contained
    brief to **opencode** to context-correct (按照上下文校正) `raw.srt` into `corrected.srt`,
-   keeping cue count + timestamps. The brief MUST keep the user's tested constraint verbatim:
-   **「由你直接動手，禁止撰寫程式或呼叫外部 API」** (opencode corrects with its own model — no
-   scripts, no external API). Exact brief → [REFERENCE.md](REFERENCE.md).
+   keeping cue count + timestamps. This is also where punctuation gets added — the ASR
+   model emits none, so nothing before this step can supply it. The brief MUST keep the
+   user's tested constraint verbatim: **「由你直接動手，禁止撰寫程式或呼叫外部 API」**
+   (opencode corrects with its own model — no scripts, no external API).
+   Exact brief → [REFERENCE.md](REFERENCE.md).
 
 3. **Lock timings.** Never trust the LLM's timestamps — rebuild from the original:
    ```bash
