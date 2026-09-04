@@ -2,3 +2,4 @@
 .DS_Store
 *.srt
 .claude/scheduled_tasks.lock
+__pycache__/
