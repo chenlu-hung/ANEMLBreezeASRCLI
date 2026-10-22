@@ -2,7 +2,7 @@
 
 ## CLI: `breeze-asr`
 
-Source: `/Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI` (Swift Package).
+Source: this repo's root (Swift Package).
 Binary: `.build/release/breeze-asr`.
 
 ```

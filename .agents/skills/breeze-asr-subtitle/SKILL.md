@@ -16,11 +16,13 @@ video/audio → breeze-asr CLI (FFmpeg + Breeze-ASR-25) → raw.srt
 
 ## Prerequisites (check once)
 
-- CLI binary: `/Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.build/release/breeze-asr`
-  If missing: `cd /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI && swift build -c release` (first build ~1 min).
+All paths below are relative to this repo's root (the directory holding `AGENTS.md`).
+
+- CLI binary: `.build/release/breeze-asr`
+  If missing: `swift build -c release` from the repo root (first build ~1 min).
 - FFmpeg on PATH (`brew install ffmpeg`). The Breeze model is reused from an existing
   ANEMLBreezeASR/VibeTyping cache — no download if either app already has it.
-- Safety-net script: `/Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py`.
+- Safety-net script: `.agents/skills/breeze-asr-subtitle/scripts/srt_tool.py`.
 
 ## Multiple files: serialize the ASR step
 
@@ -74,7 +76,7 @@ an optimization.
 
 3. **Lock timings.** Never trust the LLM's timestamps — rebuild from the original:
    ```bash
-   python3 /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py reattach "<workdir>/raw.srt" "<workdir>/corrected.srt" "<final>.srt"
+   python3 .agents/skills/breeze-asr-subtitle/scripts/srt_tool.py reattach "<workdir>/raw.srt" "<workdir>/corrected.srt" "<final>.srt"
    ```
    Report the printed `cues=N mismatches=M`; investigate if mismatches > 0.
 
@@ -82,7 +84,7 @@ an optimization.
    again to translate the corrected SRT (same verbatim constraint: 由你直接動手，禁止撰寫
    程式或呼叫外部 API), then reattach with `--fallback empty`:
    ```bash
-   python3 /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py reattach "<final>.srt" "<translated_llm>.srt" "<final>.<lang>.srt" --fallback empty
+   python3 .agents/skills/breeze-asr-subtitle/scripts/srt_tool.py reattach "<final>.srt" "<translated_llm>.srt" "<final>.<lang>.srt" --fallback empty
    ```
 
 5. **Report** the final SRT path(s). Default output sits next to the input file.

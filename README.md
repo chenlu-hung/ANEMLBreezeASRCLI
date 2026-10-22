@@ -7,16 +7,18 @@ default, or a voice-cloned local dub as an opt-in.
 
 The CLI itself does **ASR only** — speech to SRT. Subtitle correction and translation are
 intentionally left to an LLM step, and turning a dub's SRT into pronounceable, time-budgeted
-lines is a judgment call, not something a flag can do. That's exactly what the two **Claude
-Code skills** below automate end-to-end.
+lines is a judgment call, not something a flag can do. That's exactly what the two **agent
+skills** below automate end-to-end.
 
-## Claude Code skills (recommended)
+## Agent skills (recommended)
 
-This repo vendors two [Claude Code](https://claude.com/claude-code) Agent Skills under
-[`.claude/skills/`](.claude/skills) — an agent working in this repo picks them up
-automatically, no install step needed.
+This repo vendors two Agent Skills under [`.agents/skills/`](.agents/skills), shared by
+Claude Code, Codex, opencode and Antigravity (`agy`) — an agent working in this repo picks
+them up automatically, no install step needed. (`.claude/skills` is a symlink to the same
+directory for Claude Code; repo instructions live in [`AGENTS.md`](AGENTS.md), with
+`CLAUDE.md` symlinked to it.)
 
-### [`breeze-asr-subtitle`](.claude/skills/breeze-asr-subtitle/SKILL.md) — transcribe → correct → translate
+### [`breeze-asr-subtitle`](.agents/skills/breeze-asr-subtitle/SKILL.md) — transcribe → correct → translate
 
 ```
 video/audio → breeze-asr CLI (FFmpeg + Breeze-ASR-25) → raw.srt
@@ -30,7 +32,7 @@ English". The skill runs the CLI locally for ASR, then dispatches correction/tra
 `srt_tool.py reattach` always rebuilds timestamps from the original cues, regardless of what
 the LLM does to them.
 
-### [`breeze-asr-dub`](.claude/skills/breeze-asr-dub/SKILL.md) — transcribe → translate → dub
+### [`breeze-asr-dub`](.agents/skills/breeze-asr-dub/SKILL.md) — transcribe → translate → dub
 
 ```
 video → breeze-asr CLI → raw.srt
@@ -48,7 +50,7 @@ call — cloud edge-tts by default, voice cloning opt-in.
 
 Both skills dispatch the correction/translation step to a separate **opencode** CLI (free,
 its own sign-in) via the `dispatch` skill, and reuse
-[`srt_tool.py`](.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py) as an SRT
+[`srt_tool.py`](.agents/skills/breeze-asr-subtitle/scripts/srt_tool.py) as an SRT
 safety net (reattach original timings, merge cues, validate). See each skill's `SKILL.md`
 for the numbered workflow and `REFERENCE.md` for exact prompts, CLI flags, and
 troubleshooting.
@@ -61,8 +63,8 @@ troubleshooting.
 - For **voice cloning** (`--clone`/`--ref`, opt-in): a built [indextts2-mlx](https://github.com/chenlu-hung/indextts2-mlx) CLI,
   located via the `--indextts2` / `--model` flags (defaults follow a `../indextts2-mlx/`
   sibling-repo layout).
-- For the **Claude Code skills**: a signed-in `opencode` CLI and Python 3 (for
-  `srt_tool.py`) — see [Claude Code skills](#claude-code-skills-recommended) above.
+- For the **agent skills**: a signed-in `opencode` CLI and Python 3 (for
+  `srt_tool.py`) — see [Agent skills](#agent-skills-recommended) above.
 
 ## Build
 

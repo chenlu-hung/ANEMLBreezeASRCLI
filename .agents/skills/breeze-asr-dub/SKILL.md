@@ -21,7 +21,7 @@ video → breeze-asr CLI → raw.srt
 ## Prerequisites (check once)
 
 - Everything breeze-asr-subtitle needs (CLI binary at
-  `/Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.build/release/breeze-asr`, build with
+  `.build/release/breeze-asr` in this repo's root, build with
   `swift build -c release` if missing; FFmpeg on PATH; `srt_tool.py` from that skill).
 - Cloud dub (default engine) needs only an internet connection — nothing else to install.
 - Voice cloning (`--clone`/`--ref`, opt-in) needs a built `indextts2-mlx` sibling repo —
@@ -41,7 +41,7 @@ video → breeze-asr CLI → raw.srt
    *number* of synth calls, not audio length, so coalesce the raw VAD cues into fewer,
    longer utterances first:
    ```bash
-   python3 /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py \
+   python3 .agents/skills/breeze-asr-subtitle/scripts/srt_tool.py \
      merge "<workdir>/raw.srt" "<workdir>/merged.srt"
    ```
    Tune `--max-gap` / `--max-dur` / `--max-chars` if lines are still too fragmented.
@@ -53,7 +53,7 @@ video → breeze-asr CLI → raw.srt
    input `merged.srt` → `corrected_llm.srt`. Then lock timings **against `merged.srt`**
    (not `raw.srt` — the merge step already re-timed the cues):
    ```bash
-   python3 /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py \
+   python3 .agents/skills/breeze-asr-subtitle/scripts/srt_tool.py \
      reattach "<workdir>/merged.srt" "<workdir>/corrected_llm.srt" "<workdir>/corrected.srt"
    ```
    Report the printed `cues=N mismatches=M`; investigate if mismatches > 0.
@@ -69,14 +69,14 @@ video → breeze-asr CLI → raw.srt
    into one (the shifted-but-non-empty text after that point just looks like a normal
    translation, `mismatches` stays 0). Compare counts explicitly:
    ```bash
-   python3 /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py count "<workdir>/corrected.srt"
-   python3 /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py count "<workdir>/translated_llm.srt"
+   python3 .agents/skills/breeze-asr-subtitle/scripts/srt_tool.py count "<workdir>/corrected.srt"
+   python3 .agents/skills/breeze-asr-subtitle/scripts/srt_tool.py count "<workdir>/translated_llm.srt"
    ```
    If the counts differ, fix the malformed block in `translated_llm.srt` (or re-dispatch)
    before reattaching — every cue past that point would otherwise be silently misaligned.
    Once counts match, reattach with `--fallback empty`:
    ```bash
-   python3 /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py \
+   python3 .agents/skills/breeze-asr-subtitle/scripts/srt_tool.py \
      reattach "<workdir>/corrected.srt" "<workdir>/translated_llm.srt" "<workdir>/translated.srt" --fallback empty
    ```
 

@@ -58,7 +58,7 @@ Before running `breeze-asr dub`:
 # b) flatten every cue's text to a single line (" ".join(text.split()))
 # c) drop empty cues (dub skips them regardless)
 # d) make sure the file ends with a trailing blank line
-python3 /Users/chenlu-hung/Documents/Projects/ANEMLBreezeASRCLI/.claude/skills/breeze-asr-subtitle/scripts/srt_tool.py validate "<workdir>/translated.srt"
+python3 .agents/skills/breeze-asr-subtitle/scripts/srt_tool.py validate "<workdir>/translated.srt"
 ```
 Do this *before* kicking off a ~20+ minute synth run, not after it fails partway through.
 
