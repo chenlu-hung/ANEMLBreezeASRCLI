@@ -66,12 +66,28 @@ troubleshooting.
 - For the **agent skills**: a signed-in `opencode` CLI and Python 3 (for
   `srt_tool.py`) — see [Agent skills](#agent-skills-recommended) above.
 
-## Build
+## Install
+
+The skills expect the binary at `.build/release/breeze-asr` (and call it as `breeze-asr`,
+so put it on your `PATH` too). Either download the prebuilt one or build from source.
+
+**Prebuilt (Apple silicon, macOS 13+)** — from [Releases](https://github.com/chenlu-hung/ANEMLBreezeASRCLI/releases):
+
+```bash
+mkdir -p .build/release
+curl -L https://github.com/chenlu-hung/ANEMLBreezeASRCLI/releases/download/v0.1.0/breeze-asr-macos-arm64-v0.1.0.tar.gz \
+  | tar xz -C .build/release
+xattr -d com.apple.quarantine .build/release/breeze-asr 2>/dev/null  # only if downloaded via a browser
+```
+
+**From source:**
 
 ```bash
 swift build -c release
 # binary: .build/release/breeze-asr
 ```
+
+Then link it onto your `PATH`, e.g. `ln -sf "$PWD/.build/release/breeze-asr" ~/.local/bin/breeze-asr`.
 
 ## Manual CLI usage
 

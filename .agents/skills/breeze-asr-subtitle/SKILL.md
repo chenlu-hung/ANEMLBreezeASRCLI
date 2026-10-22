@@ -18,8 +18,11 @@ video/audio → breeze-asr CLI (FFmpeg + Breeze-ASR-25) → raw.srt
 
 All paths below are relative to this repo's root (the directory holding `AGENTS.md`).
 
-- CLI binary: `.build/release/breeze-asr`
-  If missing: `swift build -c release` from the repo root (first build ~1 min).
+- CLI binary: `.build/release/breeze-asr` (the steps below call it as `breeze-asr`; if
+  that is not on `PATH`, use the full path). If missing, either download the prebuilt
+  arm64 binary from the GitHub release (no Xcode toolchain needed):
+  `mkdir -p .build/release && gh release download v0.1.0 -R chenlu-hung/ANEMLBreezeASRCLI -p '*.tar.gz' -O - | tar xz -C .build/release`
+  or build it: `swift build -c release` from the repo root (first build ~1 min).
 - FFmpeg on PATH (`brew install ffmpeg`). The Breeze model is reused from an existing
   ANEMLBreezeASR/VibeTyping cache — no download if either app already has it.
 - Safety-net script: `.agents/skills/breeze-asr-subtitle/scripts/srt_tool.py`.
