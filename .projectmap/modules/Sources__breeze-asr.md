@@ -8,12 +8,15 @@ serviced and the model load doesn't deadlock. The transcription path is `FFmpegS
 (extract 16 kHz mono WAV) → `WhisperKitService` (Breeze-ASR-25 with VAD chunking, model-cache
 resolution) → `SubtitleService` (write SRT via SwiftSubtitles), with `SupportedLanguage`
 mapping language codes to Whisper. The `dub` path is `DubbingService`: by default it
-synthesises per-cue speech via the cloud edge-tts engine (`synthesiseCloud`/`synthesiseCue`
-using the native SwiftEdgeTTS package, fixed neural voice, no cloning), or — when
+synthesises per-cue speech via the cloud edge-tts engine (`synthesiseCloud`/`synthesiseCue`/`runEdgeTTS`
+shelling out to the python edge-tts CLI, fixed neural voice, no cloning), or — when
 `--clone`/`--ref` is given — extracts a voice reference and drives the external indextts2 CLI
 (`synthesise`). It then places clips on the timeline (default stretch-video, plus sequential /
-uniform-speed) and muxes the result with FFmpeg; stretch-video is the only mode that
-re-encodes (VideoToolbox hardware encoder by default).
+uniform-speed) and muxes the result with FFmpeg. Stretch-video is a frame-exact 60 fps segment
+graph that can also fast-forward silent gaps (`--compress-gaps`); `--fit-rate` re-synthesises
+sparse cloud cues slower. Subtitles are re-timed to the output and burned in by default
+(`writeSubtitles`, libass ffmpeg found via `FFmpegService.findFFmpeg(withFilter:)`); re-encodes
+use the VideoToolbox hardware encoder by default.
 
 <!-- projectmap:auto:start (generated — do not edit by hand) -->
 ## Files (6)
@@ -87,7 +90,6 @@ re-encodes (VideoToolbox hardware encoder by default).
 - `CoreML`
 - `Foundation`
 - `Hub`
-- `SwiftEdgeTTS`
 - `SwiftSubtitles`
 - `WhisperKit`
 <!-- projectmap:auto:end -->

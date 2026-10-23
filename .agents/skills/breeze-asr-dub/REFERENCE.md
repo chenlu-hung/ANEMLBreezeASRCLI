@@ -93,6 +93,17 @@ OPTIONS
                               (default: trim — tighter onset sync, less speed-up needed)
   --keep-original <vol>        Keep original audio under the dub at this volume (0 = replace)
   --wav-dir <dir>               Reuse already-generated clips in <dir>, skip TTS entirely
+  --fit-rate <pct>              (cloud) Slow sparse cues up to pct% (edge-tts --rate) so speech
+                              fills ~90% of the slot; one extra TTS call per slowed cue
+  --compress-gaps <f>           (stretch-video) Fast-forward each cue's leftover silence ×f;
+                              output gets shorter
+  --gap-pause <sec>             (compress-gaps) Pause kept at 1× after speech (default 0.5)
+  --edge-tts <path>             edge-tts CLI (default: on PATH)
+
+SUBTITLES (burned in by default; also written as <output>.srt on the output timeline)
+  --no-burn-subs               Don't burn subtitles
+  --ffmpeg <path>              Use this ffmpeg (burning needs libass; without --ffmpeg, dub
+                              auto-picks an install that has it — ffmpeg-full, conda envs)
   --max-speedup <f>              (sequential mode only) max atempo to fit a clip into its slot
 
 CLONING (opt-in, switches engine to local indextts2)
@@ -119,6 +130,13 @@ Priority order (matches how the user actually wants lecture dubs to behave):
 2. Failing that, shorten the translation (the dub-specific translation prompt already
    asks for this — terse, time-budgeted lines).
 3. Only as a last resort, raise the global tempo (`--speed`).
+
+The opposite problem — **speech rushes, then long silence** — happens when the translation is
+*shorter* than the source (terse English from chatty spoken Chinese fills ~50–60% of the
+timeline). Fix it with `--fit-rate 15 --compress-gaps 3` on the stretch timeline: sparse lines
+are re-synthesised up to 15% slower, and the silence that remains after each line's speech
+(+ a 0.5 s pause) is fast-forwarded ×3. On a 100-minute lecture this took speech from 56% to
+~78% of the timeline, long (>3 s) silences from 503 to 3, and the video to ~77 minutes.
 
 `--uniform-speed` (one global atempo, no re-encode) is the audio-only alternative when a
 re-encode isn't wanted, at the cost of possible local overlap on the tightest lines.
@@ -173,6 +191,11 @@ not an idle-sleep false kill.
   speed up — either accept it, shorten the translation, or switch back to `--stretch-video`.
 - **Background dub job reported "killed" with no error**: see
   [Long runs need caffeinate](#long-runs-need-caffeinate).
+- **Dub rushes then goes silent / long dead air between lines**: the translation is shorter
+  than the source — add `--fit-rate 15 --compress-gaps 3` (see
+  [Timeline mode](#timeline-mode--which-to-pick)).
+- **"Burning subtitles needs an ffmpeg built with libass"**: no libass ffmpeg was found —
+  `brew install ffmpeg-full` (or conda-forge ffmpeg) and pass `--ffmpeg <path>`, or `--no-burn-subs`.
 - **Re-running to tweak just the timeline/tempo**: use `--wav-dir <dir>` from a prior run
   instead of re-synthesising from scratch (works for both cloud and clone engines).
 - **Cloning path can't find indextts2 binary/model**: confirm the `../indextts2-mlx/`

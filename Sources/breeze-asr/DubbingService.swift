@@ -1,6 +1,5 @@
 import Foundation
 import SwiftSubtitles
-import SwiftEdgeTTS
 
 /// Generates a time-aligned English dub from a translated SRT and muxes it back into
 /// the source video. Per-cue speech is synthesised by the external `indextts2` CLI
@@ -23,9 +22,14 @@ struct DubbingService {
         var globalTempo: Double?        // explicit uniform tempo; nil = auto-fit to the video length
         var trimSilence: Bool           // strip indextts2's leading/trailing silence before placing
         var stretchVideo: Bool          // freeze/extend the video at dense cues so natural-speed dub fits
+        var compressGaps: Double?       // stretch: fast-forward each cue's leftover silence ×this; nil = off
+        var gapPause: TimeInterval      // stretch + compressGaps: pause kept at 1× after each cue's speech
+        var fitRateMax: Int?            // cloud: slow sparse cues by up to this % to fill their slot; nil = off
+        var burnSubtitles: Bool         // burn the dub's text into the video (needs an ffmpeg with libass)
         var hardwareVideoEncode: Bool   // stretch re-encode: true = VideoToolbox HW (fast), false = libx264
         var ttsEngine: TTSEngine        // .cloud (edge-tts, fixed natural voice) or .local (indextts2 clone)
         var cloudVoice: String          // edge-tts voice id used by the cloud engine
+        var edgeTTSBinary: URL?         // python `edge-tts` CLI used by the cloud engine
         var quiet: Bool
     }
 
@@ -73,7 +77,8 @@ struct DubbingService {
             case .cloud:
                 // Cloud TTS (edge-tts): a fixed, natural neural voice — no cloning, so nothing is
                 // extracted from the video and indextts2 need not be installed.
-                try await synthesiseCloud(cues: cues, srtStem: srtStem, into: clipDir)
+                try await synthesiseCloud(cues: cues, srtStem: srtStem, videoDuration: videoDuration,
+                                          into: clipDir)
             case .local:
                 // Local TTS (indextts2): clone the original speaker. An explicit --ref wins;
                 // otherwise pull a reference clip straight out of the source video's audio.
@@ -114,12 +119,14 @@ struct DubbingService {
             clips.append((position, cue.startTimeInSeconds, raw, clipURL))
         }
         guard !clips.isEmpty else { throw CLIError("No clips were generated — nothing to mux.") }
+        let texts = Dictionary(cues.compactMap { cue in cue.position.map { ($0, cue.text) } },
+                               uniquingKeysWith: { first, _ in first })
 
         // Elastic-timeline mode: keep the dub at a single natural speed and instead stretch the
         // video (freeze the last frame) at cues whose speech overruns, so audio and video stay
         // locked together and nothing overlaps. Handled on its own path and returns.
         if config.stretchVideo {
-            try await dubWithStretchedVideo(clips: clips, videoURL: videoURL,
+            try await dubWithStretchedVideo(clips: clips, texts: texts, srtURL: srtURL, videoURL: videoURL,
                                             videoDuration: videoDuration, clipDir: clipDir,
                                             output: outputURL)
             return
@@ -187,8 +194,12 @@ struct DubbingService {
             log("  dub track length \(fmt(trackDuration))s ≈ video \(fmt(videoDuration))s ✓")
         }
 
-        // 5. Mux into the video.
-        try await mux(video: videoURL, dubTrack: dubTrack, output: outputURL)
+        // 5. Mux into the video (re-encoding it only to burn subtitles).
+        let retimed = try writeSubtitles(placements, texts: texts, totalDuration: videoDuration,
+                                         srtURL: srtURL, output: outputURL)
+        let burn = config.burnSubtitles ? try burnableCopy(of: retimed) : nil
+        defer { if let burn { try? FileManager.default.removeItem(at: burn) } }
+        try await mux(video: videoURL, dubTrack: dubTrack, burn: burn, output: outputURL)
 
         if config.reuseWavDir == nil {
             try? FileManager.default.removeItem(at: clipDir)
@@ -268,55 +279,120 @@ struct DubbingService {
         }
     }
 
-    // MARK: - Cloud TTS (edge-tts, native)
+    // MARK: - Cloud TTS (edge-tts CLI)
 
-    /// Synthesise one clip per cue with edge-tts (Microsoft neural voices) via the pure-Swift
-    /// SwiftEdgeTTS client — a fixed, natural voice, no cloning, no Python and no external binary.
-    /// Each cue is spoken at its natural rate (the timeline stage applies any speed-up) and written
-    /// as <stem>_<NNN>.wav (mono 22.05 kHz pcm) so cloud and indextts2 clips are byte-format-
-    /// identical from here on. Cloud synthesis needs an internet connection.
-    private func synthesiseCloud(cues: [Subtitles.Cue], srtStem: String, into dir: URL) async throws {
-        let edge = EdgeTTSService()
+    /// Cues synthesised at once. Each edge-tts call is network-bound (~1–2 s), so a few in flight
+    /// cut a long dub's TTS time severalfold without tripping the endpoint's rate limit.
+    private static let edgeTTSConcurrency = 4
+
+    /// Synthesise one clip per cue with edge-tts (Microsoft neural voices) by running the python
+    /// `edge-tts` CLI — a fixed, natural voice, no cloning. The CLI is used instead of a native
+    /// Swift client because Microsoft changes the endpoint's request signing without notice
+    /// (2026-10: `Sec-MS-GEC` v2 broke SwiftEdgeTTS 1.3.0) and python edge-tts tracks it promptly;
+    /// the fix is then just `pip install -U edge-tts`. Each cue is spoken at its natural rate (the
+    /// timeline stage applies any speed-up) and written as <stem>_<NNN>.wav (mono 22.05 kHz pcm)
+    /// so cloud and indextts2 clips are byte-format-identical from here on. Needs internet.
+    ///
+    /// With `fitRateMax`, a cue whose natural-rate speech fills less than `fitRateTarget` of its
+    /// slot (until the next cue starts) is re-synthesised slower — edge-tts `--rate`, at most
+    /// `fitRateMax`% — so speech is spread over the slot instead of rushing then going silent.
+    private func synthesiseCloud(cues: [Subtitles.Cue], srtStem: String, videoDuration: TimeInterval,
+                                 into dir: URL) async throws {
+        guard let binary = config.edgeTTSBinary else { throw CLIError("edge-tts CLI not configured.") }
         let ordered = cues.sorted { $0.startTimeInSeconds < $1.startTimeInSeconds }
-        log("Synthesising \(ordered.count) dub clips with edge-tts (voice \(config.cloudVoice))…")
+        let jobs: [(position: Int, text: String, slot: TimeInterval)] = ordered.enumerated()
+            .compactMap { i, cue in
+                guard let position = cue.position else { return nil }
+                let nextStart = i + 1 < ordered.count ? ordered[i + 1].startTimeInSeconds : videoDuration
+                let slot = max(nextStart - cue.startTimeInSeconds, 0.05)
+                // SRT text can span several lines; flatten it to a single spoken string.
+                let text = cue.text
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else {
+                    log("  ⚠️  cue \(position): empty text — skipping")
+                    return nil
+                }
+                return (position, text, slot)
+            }
+        log("Synthesising \(jobs.count) dub clips with edge-tts (voice \(config.cloudVoice)"
+            + (config.fitRateMax.map { ", fitting rate down to -\($0)%" } ?? "") + ")…")
         var done = 0
-        for cue in ordered {
-            guard let position = cue.position else { continue }
-            // SRT text can span several lines; flatten it to a single spoken string.
-            let text = cue.text
-                .replacingOccurrences(of: "\n", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else {
-                log("  ⚠️  cue \(position): empty text — skipping")
-                continue
-            }
-            // edge-tts emits mp3; transcode to the pipeline's wav format so trimming/placement
-            // treat cloud and local clips identically.
-            let mp3 = dir.appendingPathComponent(String(format: "%@_%03d.mp3", srtStem, position))
-            try await synthesiseCue(edge, text: text, out: mp3)
-            let wav = dir.appendingPathComponent(String(format: "%@_%03d.wav", srtStem, position))
-            try await ffmpeg.run(["-i", mp3.path, "-ar", "22050", "-ac", "1",
-                                  "-c:a", "pcm_s16le", "-y", wav.path])
-            try? FileManager.default.removeItem(at: mp3)
+        var rates: [Int] = []
+        func tick(_ rate: Int) {
             done += 1
+            rates.append(rate)
             if !config.quiet {
-                FileHandle.standardError.write(Data("\r  [edge-tts] \(done)/\(ordered.count)   ".utf8))
+                FileHandle.standardError.write(Data("\r  [edge-tts] \(done)/\(jobs.count)   ".utf8))
             }
+        }
+        try await withThrowingTaskGroup(of: Int.self) { group in
+            for (i, job) in jobs.enumerated() {
+                if i >= Self.edgeTTSConcurrency, let rate = try await group.next() {
+                    tick(rate)
+                }
+                group.addTask {
+                    let wav = dir.appendingPathComponent(String(format: "%@_%03d.wav", srtStem, job.position))
+                    try await synthesiseCloudClip(binary: binary, text: job.text, rate: 0, wav: wav)
+                    guard let maxSlow = config.fitRateMax else { return 0 }
+                    let speech = try await speechDuration(of: wav)
+                    let rate = Self.fittedRate(speech: speech, slot: job.slot, maxSlowdown: maxSlow)
+                    if rate < 0 {
+                        try await synthesiseCloudClip(binary: binary, text: job.text, rate: rate, wav: wav)
+                    }
+                    return rate
+                }
+            }
+            while let rate = try await group.next() { tick(rate) }
         }
         if !config.quiet { FileHandle.standardError.write(Data("\n".utf8)) }
         guard done > 0 else { throw CLIError("edge-tts produced no clips (all cues empty?).") }
+        if config.fitRateMax != nil {
+            let slowed = rates.filter { $0 < 0 }.sorted()
+            let median = slowed.isEmpty ? 0 : slowed[slowed.count / 2]
+            log("Fit rate: \(slowed.count)/\(rates.count) cues slowed (median \(median)%, "
+                + "\(rates.filter { $0 == -(config.fitRateMax ?? 0) }.count) at the -\(config.fitRateMax ?? 0)% cap).")
+        }
     }
 
-    /// Synthesise a single cue via SwiftEdgeTTS, writing an mp3 to `out`. The Microsoft endpoint
-    /// intermittently returns no audio (and occasionally rate-limits); left unhandled, one such
-    /// blip aborts a whole multi-hundred-cue dub. So retry a few times with a short backoff, and
-    /// treat a zero-byte result as a failure too.
-    private func synthesiseCue(_ edge: EdgeTTSService, text: String, out: URL) async throws {
+    /// Share of a cue's slot that `--fit-rate` aims to fill with speech.
+    private static let fitRateTarget = 0.9
+
+    /// edge-tts `--rate` percent (≤ 0) that stretches `speech` to `fitRateTarget` of `slot`,
+    /// assuming duration scales with 1/(1 + rate). Never speeds up: overruns are the timeline's job.
+    static func fittedRate(speech: TimeInterval, slot: TimeInterval, maxSlowdown: Int) -> Int {
+        let rate = Int(((speech / (fitRateTarget * slot) - 1) * 100).rounded())
+        return max(-maxSlowdown, min(0, rate))
+    }
+
+    /// Synthesise one cue at `rate`% and write it as the pipeline's wav. edge-tts emits mp3;
+    /// transcode so trimming/placement treat cloud and local clips identically.
+    private func synthesiseCloudClip(binary: URL, text: String, rate: Int, wav: URL) async throws {
+        let mp3 = wav.deletingPathExtension().appendingPathExtension("mp3")
+        try await synthesiseCue(binary: binary, text: text, rate: rate, out: mp3)
+        try await ffmpeg.run(["-i", mp3.path, "-ar", "22050", "-ac", "1",
+                              "-c:a", "pcm_s16le", "-y", wav.path])
+        try? FileManager.default.removeItem(at: mp3)
+    }
+
+    /// Length of a clip's actual speech (leading/trailing silence trimmed, as placement sees it).
+    private func speechDuration(of wav: URL) async throws -> TimeInterval {
+        let trimmed = wav.deletingPathExtension().appendingPathExtension("fit.wav")
+        defer { try? FileManager.default.removeItem(at: trimmed) }
+        try await trimSilence(from: wav, to: trimmed)
+        return try await ffmpeg.getVideoDuration(url: trimmed)
+    }
+
+    /// Synthesise a single cue via the edge-tts CLI, writing an mp3 to `out`. The Microsoft
+    /// endpoint intermittently returns no audio (and occasionally rate-limits); left unhandled,
+    /// one such blip aborts a whole multi-hundred-cue dub. So retry a few times with a short
+    /// backoff, and treat a zero-byte result as a failure too.
+    private func synthesiseCue(binary: URL, text: String, rate: Int, out: URL) async throws {
         let maxAttempts = 4
         var lastError: Error?
         for attempt in 1...maxAttempts {
             do {
-                _ = try await edge.synthesize(text: text, voice: config.cloudVoice, outputURL: out)
+                try await runEdgeTTS(binary: binary, text: text, rate: rate, out: out)
                 let size = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)??.intValue ?? 0
                 if size > 0 { return }
                 lastError = CLIError("edge-tts returned an empty audio file")
@@ -332,13 +408,46 @@ struct DubbingService {
         throw CLIError("edge-tts failed after \(maxAttempts) attempts: "
             + "\(lastError.map { String(describing: $0) } ?? "unknown error")\n"
             + "  (Cloud TTS needs an internet connection; the Microsoft endpoint also rate-limits — "
-            + "if this persists, retry later.)")
+            + "if this persists, retry later. A handshake/403 error usually means Microsoft changed "
+            + "the protocol: `pip install -U edge-tts`.)")
+    }
+
+    /// One `edge-tts` CLI call. `--text=`/`--rate=` (not `--text <t>`) so a line or a negative
+    /// rate starting with "-" is never taken for an option; word-boundary subtitles go to
+    /// /dev/null and the progress bar is off, so the captured stderr holds only a failure message.
+    private func runEdgeTTS(binary: URL, text: String, rate: Int, out: URL) async throws {
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = ["--voice", config.cloudVoice, "--text=\(text)",
+                             "--rate=\(rate >= 0 ? "+" : "")\(rate)%",
+                             "--write-media", out.path, "--write-subtitles", "/dev/null", "--no-progress"]
+        let errorPipe = Pipe()
+        process.standardOutput = Pipe()
+        process.standardError = errorPipe
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            process.terminationHandler = { p in
+                guard p.terminationStatus != 0 else { return continuation.resume() }
+                let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let lastLine = stderr.split(separator: "\n").last.map(String.init) ?? ""
+                continuation.resume(throwing: CLIError("edge-tts exited with status \(p.terminationStatus): \(lastLine)"))
+            }
+            do { try process.run() } catch { continuation.resume(throwing: error) }
+        }
     }
 
     // MARK: - Elastic timeline (stretch video to fit a natural-speed dub)
 
+    /// Frame rate of the rebuilt timeline. The source is resampled to it first, so every segment
+    /// boundary is a whole frame and every segment's output length an exact frame count —
+    /// audio placed from the same counts can't drift, however many segments there are.
+    private static let timelineFPS = 60
+
+    /// Below this much leftover silence a gap isn't worth its own fast-forward segment.
+    private static let minCompressibleGap: TimeInterval = 0.3
+
     /// One slice of the rebuilt timeline: the original video window `[origStart, origEnd)` held
-    /// for `targetDur` (≥ the window — the surplus is a frozen tail), optionally carrying a dub.
+    /// for `targetDur` — longer than the window means a frozen tail (speech overruns), shorter
+    /// means fast-forward (a compressed silent gap) — optionally carrying a dub.
     private struct Segment {
         let origStart: TimeInterval
         let origEnd: TimeInterval
@@ -346,19 +455,32 @@ struct DubbingService {
         let dub: (wav: URL, position: Int, rawDuration: TimeInterval)?
         var window: TimeInterval { origEnd - origStart }
         var freeze: TimeInterval { max(targetDur - window, 0) }
+
+        /// Source frames `[startFrame, endFrame)` and how many frames they become in the output.
+        var frames: (start: Int, end: Int, out: Int) {
+            let fps = Double(DubbingService.timelineFPS)
+            let start = Int((origStart * fps).rounded())
+            let end = max(Int((origEnd * fps).rounded()), start + 1)
+            let out = max(Int((targetDur * fps).rounded()), 1)
+            return (start, end, out)
+        }
     }
 
     /// Dub by stretching the video instead of compressing the audio: the dub plays at one
     /// natural speed and each cue's video window is frozen-extended just enough to contain it,
     /// so audio and video stay in lockstep and never overlap. The output video is a little longer
-    /// than the source, with brief freezes at the densest moments.
+    /// than the source, with brief freezes at the densest moments. With `--compress-gaps`, the
+    /// silence left after each cue's speech (+ a short pause) is fast-forwarded instead, so the
+    /// output gets shorter and the dub is never followed by long dead air.
     private func dubWithStretchedVideo(clips: [(position: Int, start: TimeInterval, raw: TimeInterval, wav: URL)],
+                                       texts: [Int: String], srtURL: URL,
                                        videoURL: URL, videoDuration: TimeInterval,
                                        clipDir: URL, output: URL) async throws {
         let tempo = max(config.globalTempo ?? 1.0, 0.5)
 
         // Tile [0, videoDuration] into segments: an optional leading gap with no dub, then one
-        // per cue running to the next cue's start (the last to the video end).
+        // per cue running to the next cue's start (the last to the video end) — or two, when the
+        // cue's silent remainder is fast-forwarded.
         var segments: [Segment] = []
         if clips[0].start > 0.05 {
             segments.append(Segment(origStart: 0, origEnd: clips[0].start,
@@ -368,33 +490,55 @@ struct DubbingService {
             let origEnd = i + 1 < clips.count ? clips[i + 1].start : videoDuration
             let window = max(origEnd - c.start, 0.01)
             let dubDur = c.raw / tempo
-            segments.append(Segment(origStart: c.start, origEnd: origEnd,
-                                    targetDur: max(window, dubDur),
-                                    dub: (c.wav, c.position, c.raw)))
+            let dub = (c.wav, c.position, c.raw)
+            let spoken = dubDur + config.gapPause
+            if let factor = config.compressGaps, window - spoken >= Self.minCompressibleGap {
+                let split = c.start + spoken
+                segments.append(Segment(origStart: c.start, origEnd: split, targetDur: spoken, dub: dub))
+                segments.append(Segment(origStart: split, origEnd: origEnd,
+                                        targetDur: (origEnd - split) / factor, dub: nil))
+            } else {
+                segments.append(Segment(origStart: c.start, origEnd: origEnd,
+                                        targetDur: max(window, dubDur), dub: dub))
+            }
         }
 
-        // New cumulative starts; audio placements anchor each dub at its segment start.
+        // New cumulative starts, counted in output frames exactly as buildStretchedVideo renders
+        // them; audio placements anchor each dub at its segment start.
+        let fps = Double(Self.timelineFPS)
         var placements: [Placement] = []
-        var cursor: TimeInterval = 0
+        var cursorFrames = 0
         for s in segments {
             if let d = s.dub {
                 placements.append(Placement(position: d.position, desiredStart: s.origStart,
-                                            placedStart: cursor, budget: s.targetDur,
+                                            placedStart: Double(cursorFrames) / fps, budget: s.targetDur,
                                             rawDuration: d.rawDuration, tempo: tempo, wav: d.wav))
             }
-            cursor += s.targetDur
+            cursorFrames += s.frames.out
         }
-        let newTotal = cursor
+        let newTotal = Double(cursorFrames) / fps
 
         let frozen = segments.filter { $0.freeze > 0.01 }
         let maxFreeze = segments.map(\.freeze).max() ?? 0
         log("Stretch video: dub at ×\(fmt(tempo)) (natural), \(frozen.count) segments extended; "
-            + "video \(fmt(videoDuration))s → \(fmt(newTotal))s (+\(fmt(newTotal - videoDuration))s), worst freeze \(fmt(maxFreeze))s.")
+            + "worst freeze \(fmt(maxFreeze))s.")
+        if let factor = config.compressGaps {
+            let fast = segments.filter { $0.dub == nil && $0.targetDur < $0.window - 0.01 }
+            let saved = fast.reduce(0) { $0 + $1.window - $1.targetDur }
+            log("Compress gaps: \(fast.count) silent gaps fast-forwarded ×\(fmt(factor)) "
+                + "(after \(fmt(config.gapPause))s pause), \(fmt(saved))s saved.")
+        }
+        log("Video \(fmt(videoDuration))s → \(fmt(newTotal))s (\(newTotal >= videoDuration ? "+" : "")\(fmt(newTotal - videoDuration))s).")
 
-        // Build the stretched (silent) video, then the natural-speed dub track, then mux.
+        // Build the stretched (silent) video — burning subtitles in the same encode — then the
+        // natural-speed dub track, then mux.
+        let subtitles = try writeSubtitles(placements, texts: texts, totalDuration: newTotal,
+                                           srtURL: srtURL, output: output)
+        let burn = config.burnSubtitles ? try burnableCopy(of: subtitles) : nil
+        defer { if let burn { try? FileManager.default.removeItem(at: burn) } }
         let stretched = clipDir.appendingPathComponent("stretched.mp4")
         let dubTrack = clipDir.appendingPathComponent("dubtrack.wav")
-        try await buildStretchedVideo(segments, source: videoURL, output: stretched)
+        try await buildStretchedVideo(segments, source: videoURL, burn: burn, output: stretched)
         try await buildDubTrack(placements, totalDuration: newTotal, output: dubTrack)
 
         let trackDuration = try await ffmpeg.getVideoDuration(url: dubTrack)
@@ -402,53 +546,170 @@ struct DubbingService {
         log("  stretched video \(fmt(videoOut))s, dub track \(fmt(trackDuration))s "
             + (abs(videoOut - trackDuration) < 0.3 ? "(aligned ✓)" : "(⚠️ mismatch)"))
 
-        try await mux(video: stretched, dubTrack: dubTrack, output: output)
+        try await mux(video: stretched, dubTrack: dubTrack, burn: nil, output: output)
 
         try? FileManager.default.removeItem(at: stretched)
         try? FileManager.default.removeItem(at: dubTrack)
         if config.reuseWavDir == nil { try? FileManager.default.removeItem(at: clipDir) }
     }
 
-    /// Re-encode the source into one video stream where each segment is its original window with
-    /// a frozen-frame tail (`tpad`) appended to reach its target duration, then concatenated.
-    /// One `filter_complex` (split → trim/setpts/tpad per segment → concat); video only.
-    private func buildStretchedVideo(_ segments: [Segment], source: URL, output: URL) async throws {
+    /// Re-encode the source into one video stream where each segment is its original window,
+    /// frozen-extended (`tpad`) or fast-forwarded (evenly dropping frames with `select`) to its
+    /// target length, then concatenated. The source is first resampled to `timelineFPS` so
+    /// segments cut on whole frames and each comes out an exact number of frames.
+    /// One `filter_complex` (fps → split → trim/tpad|select/setpts per segment → concat
+    /// [→ subtitles]); video only.
+    private func buildStretchedVideo(_ segments: [Segment], source: URL, burn: URL?, output: URL) async throws {
         let n = segments.count
+        let fps = Self.timelineFPS
         var parts: [String] = []
         let splitOuts = (0..<n).map { "[s\($0)]" }.joined()
-        parts.append("[0:v]split=\(n)\(splitOuts)")
+        parts.append("[0:v]fps=\(fps),split=\(n)\(splitOuts)")
         var concatIns = ""
         for (i, seg) in segments.enumerated() {
-            var chain = "[s\(i)]trim=start=\(String(format: "%.3f", seg.origStart)):end=\(String(format: "%.3f", seg.origEnd)),setpts=PTS-STARTPTS"
-            if seg.freeze > 0.01 {
-                chain += ",tpad=stop_mode=clone:stop_duration=\(String(format: "%.3f", seg.freeze))"
+            let f = seg.frames
+            let inFrames = f.end - f.start
+            var chain = "[s\(i)]trim=start_frame=\(f.start):end_frame=\(f.end),setpts=PTS-STARTPTS"
+            if f.out > inFrames {
+                chain += ",tpad=stop_mode=clone:stop=\(f.out - inFrames)"
+            } else if f.out < inFrames {
+                // Keep exactly f.out of the window's frames, evenly spaced, then retime them
+                // back to back.
+                chain += ",select='gt(floor((n+1)*\(f.out)/\(inFrames))-floor(n*\(f.out)/\(inFrames)),0)'"
+                    + ",setpts=N/(\(fps)*TB)"
             }
             chain += "[p\(i)]"
             parts.append(chain)
             concatIns += "[p\(i)]"
         }
-        parts.append("\(concatIns)concat=n=\(n):v=1:a=0[v]")
+        if let burn {
+            parts.append("\(concatIns)concat=n=\(n):v=1:a=0[c]")
+            parts.append("[c]\(Self.subtitlesFilter(burn))[v]")
+        } else {
+            parts.append("\(concatIns)concat=n=\(n):v=1:a=0[v]")
+        }
         let filter = parts.joined(separator: ";")
 
-        // The stretch path is the only one that re-encodes video (the tpad/concat graph can't be
-        // stream-copied). Default to Apple-silicon hardware H.264 (VideoToolbox): constant-quality
-        // (-q:v, resolution-independent) at a few minutes instead of libx264's tens of minutes on a
-        // long 1080p60 lecture. `--sw-encode` forces libx264 for marginally higher quality.
-        let encoderArgs: [String]
-        if config.hardwareVideoEncode {
-            encoderArgs = ["-c:v", "h264_videotoolbox", "-q:v", "65", "-allow_sw", "1",
-                           "-profile:v", "high", "-pix_fmt", "yuv420p"]
-        } else {
-            encoderArgs = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
-        }
         log("Assembling stretched video (\(n) segments, "
-            + "\(config.hardwareVideoEncode ? "VideoToolbox HW" : "libx264"))…")
+            + "\(config.hardwareVideoEncode ? "VideoToolbox HW" : "libx264")"
+            + "\(burn != nil ? ", burning subtitles" : ""))…")
         try await ffmpeg.run([
             "-i", source.path,
             "-filter_complex", filter,
             "-map", "[v]", "-an",
-            "-r", "60", "-fps_mode", "cfr"
-        ] + encoderArgs + ["-y", output.path])
+            "-r", String(fps), "-fps_mode", "cfr"
+        ] + videoEncoderArgs + ["-y", output.path])
+    }
+
+    /// Video encoder for every path that can't stream-copy (stretch graph, burned subtitles).
+    /// Default to Apple-silicon hardware H.264 (VideoToolbox): constant-quality (-q:v,
+    /// resolution-independent) at a few minutes instead of libx264's tens of minutes on a long
+    /// 1080p60 lecture. `--sw-encode` forces libx264 for marginally higher quality.
+    private var videoEncoderArgs: [String] {
+        if config.hardwareVideoEncode {
+            return ["-c:v", "h264_videotoolbox", "-q:v", "65", "-allow_sw", "1",
+                    "-profile:v", "high", "-pix_fmt", "yuv420p"]
+        }
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+    }
+
+    // MARK: - Subtitles
+
+    /// Longest reading subtitle in characters — about two lines at the burned style's size.
+    private static let subtitleMaxChars = 84
+
+    /// Burned-in style (libass `force_style`): white text, black outline, bottom centre. libass
+    /// scales FontSize with the video height, so it reads the same at 720p and 1080p.
+    private static let subtitleStyle = "FontName=Helvetica,FontSize=15,PrimaryColour=&H00FFFFFF,"
+        + "OutlineColour=&H00000000,BorderStyle=1,Outline=1.6,Shadow=0,MarginV=14"
+
+    private static func subtitlesFilter(_ srt: URL) -> String {
+        "subtitles=filename='\(srt.path)':force_style='\(subtitleStyle)'"
+    }
+
+    /// Write reading subtitles on the *output* timeline next to `output` (`<name>.srt`, or
+    /// `<name>.retimed.srt` if that is the input SRT): each cue's text split into ≤2-line chunks
+    /// spread over its spoken placement by length, the last held until the next cue starts.
+    /// Letters spelled out for the TTS ("A I") are joined back ("AI") for reading.
+    private func writeSubtitles(_ placements: [Placement], texts: [Int: String], totalDuration: TimeInterval,
+                                srtURL: URL, output: URL) throws -> URL {
+        let sorted = placements.sorted { $0.placedStart < $1.placedStart }
+        var blocks: [String] = []
+        for (i, p) in sorted.enumerated() {
+            guard let text = texts[p.position] else { continue }
+            let chunks = Self.readingChunks(Self.rejoinSpelledLetters(
+                text.replacingOccurrences(of: "\n", with: " ")))
+            guard !chunks.isEmpty else { continue }
+            let next = i + 1 < sorted.count ? sorted[i + 1].placedStart : totalDuration
+            let totalChars = Double(chunks.reduce(0) { $0 + $1.count })
+            var t = p.placedStart
+            for (k, chunk) in chunks.enumerated() {
+                let end = k == chunks.count - 1
+                    ? max(next - 0.05, t + 0.3)
+                    : t + p.fittedDuration * Double(chunk.count) / totalChars
+                blocks.append("\(blocks.count + 1)\n\(Self.srtTime(t)) --> \(Self.srtTime(end))\n\(chunk)\n")
+                t = end
+            }
+        }
+        var url = output.deletingPathExtension().appendingPathExtension("srt")
+        if url.standardizedFileURL == srtURL.standardizedFileURL {
+            url = output.deletingPathExtension().appendingPathExtension("retimed.srt")
+        }
+        try blocks.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        log("Subtitles on the output timeline: \(url.path)")
+        return url
+    }
+
+    /// The subtitles filter takes a path inside a filtergraph, where quotes, colons and
+    /// backslashes in a user's directory name would need escaping; a temp copy sidesteps that.
+    private func burnableCopy(of srt: URL) throws -> URL {
+        let copy = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("breeze-dub-subs-\(UUID().uuidString).srt")
+        try FileManager.default.copyItem(at: srt, to: copy)
+        return copy
+    }
+
+    /// Split a cue into reading chunks of at most `maxChars`, preferring breaks after clause
+    /// punctuation, then packing words greedily.
+    static func readingChunks(_ text: String, maxChars: Int = subtitleMaxChars) -> [String] {
+        var clauses: [[Substring]] = [[]]
+        for word in text.split(separator: " ") {
+            clauses[clauses.count - 1].append(word)
+            if let last = word.last, ".?!;,—".contains(last) { clauses.append([]) }
+        }
+        var chunks: [String] = []
+        var current = ""
+        for clause in clauses where !clause.isEmpty {
+            let joined = clause.joined(separator: " ")
+            for piece in joined.count <= maxChars ? [joined] : clause.map(String.init) {
+                let candidate = current.isEmpty ? piece : current + " " + piece
+                if candidate.count <= maxChars {
+                    current = candidate
+                } else {
+                    if !current.isEmpty { chunks.append(current) }
+                    current = piece
+                }
+            }
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
+    }
+
+    /// "A I" → "AI", "G P T" → "GPT": runs of single capital letters the dub prompt spells out
+    /// so the TTS says each letter.
+    static func rejoinSpelledLetters(_ text: String) -> String {
+        let regex = try! NSRegularExpression(pattern: "\\b[A-Z](?: [A-Z]\\b)+")
+        var result = text
+        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            result.replaceSubrange(range, with: result[range].replacingOccurrences(of: " ", with: ""))
+        }
+        return result
+    }
+
+    static func srtTime(_ t: TimeInterval) -> String {
+        let ms = max(Int((t * 1000).rounded()), 0)
+        return String(format: "%02d:%02d:%02d,%03d", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
     }
 
     // MARK: - Clip preprocessing
@@ -521,20 +782,28 @@ struct DubbingService {
         try await ffmpeg.run(args)
     }
 
-    private func mux(video: URL, dubTrack: URL, output: URL) async throws {
-        log("Muxing dub into video…")
+    /// Mux the dub track into `video`, stream-copying the picture unless `burn` subtitles must be
+    /// rendered into it.
+    private func mux(video: URL, dubTrack: URL, burn: URL?, output: URL) async throws {
+        log("Muxing dub into video\(burn != nil ? " (burning subtitles)" : "")…")
         var args = ["-i", video.path, "-i", dubTrack.path]
+        var graph: [String] = []
+        var videoMap = "0:v:0"
+        var audioMap = "1:a:0"   // default: replace the audio entirely with the dub
         if config.keepOriginalVolume > 0 {
             // Duck the original speech under the dub instead of replacing it.
-            let fc = "[0:a]volume=\(String(format: "%.3f", config.keepOriginalVolume))[orig];"
-                + "[orig][1:a]amix=inputs=2:normalize=0:dropout_transition=0[a]"
-            args += ["-filter_complex", fc, "-map", "0:v:0", "-map", "[a]"]
-        } else {
-            // Replace the audio entirely with the dub.
-            args += ["-map", "0:v:0", "-map", "1:a:0"]
+            graph.append("[0:a]volume=\(String(format: "%.3f", config.keepOriginalVolume))[orig];"
+                + "[orig][1:a]amix=inputs=2:normalize=0:dropout_transition=0[a]")
+            audioMap = "[a]"
         }
+        if let burn {
+            graph.append("[0:v]\(Self.subtitlesFilter(burn))[v]")
+            videoMap = "[v]"
+        }
+        if !graph.isEmpty { args += ["-filter_complex", graph.joined(separator: ";")] }
+        args += ["-map", videoMap, "-map", audioMap]
+        args += burn != nil ? videoEncoderArgs : ["-c:v", "copy"]
         args += [
-            "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
             "-shortest",
             "-y", output.path

@@ -9,7 +9,7 @@ on-device Breeze-ASR-25 model (via WhisperKit), and can synthesise a time-aligne
 translated SRT. It is ASR-only — subtitle correction/translation are deliberately left to an
 external LLM step. The architecture is a thin arg-parsing entry point delegating to focused
 services: a transcription pipeline (FFmpeg → WhisperKit → SwiftSubtitles) and a dubbing pipeline
-that by default synthesises per-cue speech via the cloud edge-tts engine (native SwiftEdgeTTS,
+that by default synthesises per-cue speech via the cloud edge-tts engine (python edge-tts CLI,
 fixed neural voice) — with local indextts2 voice cloning as an opt-in (`--clone`/`--ref`) — then
 does timeline placement (default stretch-video) → FFmpeg mux.
 
@@ -44,6 +44,6 @@ does timeline placement (default stretch-video) → FFmpeg mux.
 
 | Module | Files | Doc | One-liner |
 |---|---|---|---|
-| `(root)` | 1 | [doc](modules/_root.md) | Swift Package manifest: macOS 13+ executable, deps WhisperKit / Hub / SwiftSubtitles / SwiftEdgeTTS |
+| `(root)` | 1 | [doc](modules/_root.md) | Swift Package manifest: macOS 13+ executable, deps WhisperKit / Hub / SwiftSubtitles |
 | `Sources/breeze-asr` | 6 | [doc](modules/Sources__breeze-asr.md) | The whole CLI: arg parsing + transcription (FFmpeg→WhisperKit→SRT) and dub (cloud edge-tts by default / indextts2 clone opt-in → timeline → mux) services |
 <!-- projectmap:modules:end -->

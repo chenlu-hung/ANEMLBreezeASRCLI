@@ -28,6 +28,59 @@ final class FFmpegService {
         self.ffmpegPath = Self.findFFmpeg()
     }
 
+    /// Use a specific ffmpeg binary (`--ffmpeg`, or one found by `findFFmpeg(withFilter:)`).
+    init(path: String) {
+        self.ffmpegPath = path
+    }
+
+    var path: String? { ffmpegPath }
+
+    /// Whether this ffmpeg was built with filter `name` — e.g. `subtitles`, which needs libass
+    /// (Homebrew's default `ffmpeg` formula ships without it).
+    func hasFilter(_ name: String) -> Bool {
+        guard let ffmpegPath else { return false }
+        return Self.binary(ffmpegPath, hasFilter: name)
+    }
+
+    /// The first ffmpeg among the usual install locations — PATH, Homebrew (incl. the
+    /// `ffmpeg-full` keg) and conda envs — that has filter `name`, or nil.
+    static func findFFmpeg(withFilter name: String) -> String? {
+        let fm = FileManager.default
+        var candidates = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
+                          "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg", "/usr/local/opt/ffmpeg-full/bin/ffmpeg"]
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            candidates += path.split(separator: ":").map { "\($0)/ffmpeg" }
+        }
+        let home = fm.homeDirectoryForCurrentUser.path
+        for conda in ["/opt/miniconda3", "/opt/anaconda3", "\(home)/miniconda3", "\(home)/anaconda3",
+                      "\(home)/miniforge3", "/opt/homebrew/Caskroom/miniforge/base"] {
+            candidates.append("\(conda)/bin/ffmpeg")
+            let envs = (try? fm.contentsOfDirectory(atPath: "\(conda)/envs")) ?? []
+            candidates += envs.sorted().map { "\(conda)/envs/\($0)/bin/ffmpeg" }
+        }
+        var seen = Set<String>()
+        for path in candidates where seen.insert(path).inserted && fm.isExecutableFile(atPath: path) {
+            if binary(path, hasFilter: name) { return path }
+        }
+        return nil
+    }
+
+    private static func binary(_ path: String, hasFilter name: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = ["-hide_banner", "-filters"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        // Rows look like " .. subtitles         V->V       Render text subtitles …".
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").contains {
+            $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst().first == Substring(name)
+        }
+    }
+
     private static func findFFmpeg() -> String? {
         let possiblePaths = [
             "/opt/homebrew/bin/ffmpeg",

@@ -23,7 +23,9 @@ video → breeze-asr CLI → raw.srt
 - Everything breeze-asr-subtitle needs (`breeze-asr` on PATH, i.e. the repo's
   `.build/release/breeze-asr`, build with `swift build -c release` if missing; FFmpeg on
   PATH; `srt_tool.py` from that skill, see its prerequisites for the path).
-- Cloud dub (default engine) needs only an internet connection — nothing else to install.
+- Cloud dub (default engine) needs the python `edge-tts` CLI (`pip install edge-tts` inside a
+  conda env) on PATH — or pass `breeze-asr dub --edge-tts <path>` — plus an internet connection.
+  If synthesis fails with a handshake/403 error, Microsoft changed the protocol: `pip install -U edge-tts`.
 - Voice cloning (`--clone`/`--ref`, opt-in) needs a built `indextts2-mlx` sibling repo —
   see [REFERENCE.md](REFERENCE.md#voice-cloning-opt-in).
 - Any run with more than a couple minutes of TTS must be wrapped in `caffeinate -dimsu` or
@@ -93,15 +95,18 @@ video → breeze-asr CLI → raw.srt
    audio) and wrap in `caffeinate` for anything non-trivial:
    ```bash
    caffeinate -dimsu breeze-asr dub "<input>" --srt "<workdir>/translated.srt" \
-     --voice <voice-for-target-lang> -o "<out>.mp4"
+     --voice <voice-for-target-lang> --fit-rate 15 --compress-gaps 3 -o "<out>.mp4"
    ```
    Defaults already give `--stretch-video` (natural-speed dub, video freeze-extended at
-   dense cues so nothing overlaps, hardware VideoToolbox re-encode) — this is the preferred
-   timeline mode for lecture-style content. Full option/voice table and mode overrides →
+   dense cues so nothing overlaps, hardware VideoToolbox re-encode) and **burned-in
+   subtitles** (`--no-burn-subs` to skip). For lecture-style content also pass
+   `--fit-rate 15 --compress-gaps 3`: terse English otherwise fills only about half the
+   timeline, so speech sounds rushed between long silences — this slows sparse lines up to
+   15% and fast-forwards the remaining silence ×3 (output gets shorter). Full option/voice table and mode overrides →
    [REFERENCE.md](REFERENCE.md#dub-options).
 
-7. **Report.** stdout of `breeze-asr dub` is the final video path — report that (and the
-   translated SRT path, in case the user also wants the plain subtitle file alongside it).
+7. **Report.** stdout of `breeze-asr dub` is the final video path — report that, plus the
+   `<out>.srt` it writes alongside (subtitles re-timed to the output video).
 
 ## Notes
 

@@ -123,8 +123,37 @@ struct BreezeASRCLI {
             throw CLIError("Voice reference not found: \(ref.path)")
         }
 
-        let ffmpeg = FFmpegService()
+        if options.fitRateMax != nil && options.ttsEngine != .cloud {
+            throw CLIError("--fit-rate needs the cloud edge-tts engine (it sets edge-tts --rate per cue).")
+        }
+        if options.compressGaps != nil && !options.stretchVideo {
+            throw CLIError("--compress-gaps works on the --stretch-video timeline (drop --no-stretch-video/--uniform-speed).")
+        }
+
+        var ffmpeg = options.ffmpegPath.map { FFmpegService(path: $0.path) } ?? FFmpegService()
         try ffmpeg.checkFFmpegAvailable()
+        // Burning subtitles needs libass, which Homebrew's default ffmpeg lacks: unless --ffmpeg
+        // pinned a binary, fall back to another install that has it (ffmpeg-full, conda-forge…).
+        if options.burnSubtitles && !ffmpeg.hasFilter("subtitles") {
+            guard options.ffmpegPath == nil, let alt = FFmpegService.findFFmpeg(withFilter: "subtitles") else {
+                throw CLIError("Burning subtitles needs an ffmpeg built with libass (the `subtitles` filter); "
+                    + "\(ffmpeg.path ?? "ffmpeg") has none. Install one (`brew install ffmpeg-full`, or "
+                    + "`conda install -c conda-forge ffmpeg`) and pass --ffmpeg <path>, or use --no-burn-subs.")
+            }
+            if !options.quiet {
+                FileHandle.standardError.write(Data("Using \(alt) (has libass) to burn subtitles.\n".utf8))
+            }
+            ffmpeg = FFmpegService(path: alt)
+        }
+
+        // Cloud TTS shells out to the python edge-tts CLI; fail now, not after setup work.
+        let edgeTTS = options.edgeTTSBinary ?? DubOptions.which("edge-tts")
+        if options.ttsEngine == .cloud && options.reuseWavDir == nil {
+            guard let edgeTTS, fm.isExecutableFile(atPath: edgeTTS.path) else {
+                throw CLIError("edge-tts CLI not found (needed for the default cloud TTS). Install it with "
+                    + "`pip install edge-tts` (e.g. in a conda env) and put it on PATH, or pass --edge-tts <path>.")
+            }
+        }
 
         let output = options.output
             ?? options.video.deletingPathExtension().appendingPathExtension("dubbed.mp4")
@@ -144,9 +173,14 @@ struct BreezeASRCLI {
             globalTempo: options.globalTempo,
             trimSilence: options.trimSilence,
             stretchVideo: options.stretchVideo,
+            compressGaps: options.compressGaps,
+            gapPause: options.gapPause,
+            fitRateMax: options.fitRateMax,
+            burnSubtitles: options.burnSubtitles,
             hardwareVideoEncode: options.hardwareVideoEncode,
             ttsEngine: options.ttsEngine,
             cloudVoice: options.cloudVoice,
+            edgeTTSBinary: edgeTTS,
             quiet: options.quiet
         )
         let service = DubbingService(ffmpeg: ffmpeg, config: config)
@@ -218,12 +252,25 @@ struct BreezeASRCLI {
           <video>                  Source video to dub (FFmpeg-readable)
 
         TTS ENGINE:
-          Default: cloud edge-tts — a fixed, natural neural voice (free, no cloning), built in
-          via the native SwiftEdgeTTS client (no Python, no external binary; needs internet).
+          Default: cloud edge-tts — a fixed, natural neural voice (free, no cloning), via the
+          python edge-tts CLI (`pip install edge-tts`; needs internet). If Microsoft changes the
+          protocol and synthesis starts failing, `pip install -U edge-tts`.
           Pass --clone (or --ref) to voice-clone the original speaker with local indextts2 instead.
           --tts <cloud|local>      Force the engine (default: cloud)
           --voice <id>             Cloud voice id (default: \(defaults.cloudVoice), natural en-US
                                    male). For a Chinese dub use e.g. zh-TW-YunJheNeural (雲哲).
+          --edge-tts <path>        edge-tts CLI (default: `edge-tts` on PATH)
+          --fit-rate <pct>         Slow each sparse cue by up to <pct>% (edge-tts --rate) so its speech
+                                   fills ~90% of the time until the next cue, instead of rushing then
+                                   going silent. Costs a second TTS call for the cues it slows. e.g. 15
+
+        SUBTITLES:
+          Subtitles are burned in by default: the dub's text, split into ≤2-line chunks and
+          timed to the dubbed speech on the output timeline (also written as <output>.srt).
+          Needs an ffmpeg with libass; if the default one lacks it, another install is used.
+          --no-burn-subs           Don't burn subtitles (the video is then stream-copied
+                                   unless the timeline mode re-encodes it anyway)
+          --ffmpeg <path>          Use this ffmpeg for everything
 
         OPTIONS:
           --srt <path>             (required) Translated SRT to voice
@@ -248,6 +295,11 @@ struct BreezeASRCLI {
           --stretch-video          (default) Keep the dub at natural speed and freeze-extend the
                                    video at dense cues so nothing overlaps and audio/video stay
                                    locked (output video ends up a little longer). Uses --speed if given.
+          --compress-gaps <f>      (stretch-video) Fast-forward the silence left after each cue's
+                                   speech (+ --gap-pause) at ×<f>, so the dub never trails into long
+                                   dead air; the output gets shorter. e.g. 3
+          --gap-pause <sec>        (compress-gaps) Pause kept at normal speed after each cue's speech
+                                   (default \(defaults.gapPause))
           --no-stretch-video       Disable the default stretch; fall back to sequential placement
                                    (or --uniform-speed for constant-speed anchoring).
           --sw-encode              (stretch-video) Re-encode with libx264 instead of the default
@@ -358,6 +410,12 @@ struct DubOptions: Sendable {
     var hardwareVideoEncode = true                    // stretch re-encode via VideoToolbox by default
     var ttsEngine: TTSEngine = .cloud                 // default on this branch: cloud edge-tts
     var cloudVoice: String = Defaults.cloudVoice
+    var edgeTTSBinary: URL?                           // nil = `edge-tts` on PATH
+    var fitRateMax: Int?                              // nil = cloud cues keep their natural rate
+    var compressGaps: Double?                         // nil = silent gaps play at normal speed
+    var gapPause: TimeInterval = Defaults.gapPauseValue
+    var burnSubtitles = true                          // default: burn the dub's text into the video
+    var ffmpegPath: URL?                              // nil = auto-discover
     var quiet = false
 
     enum Defaults {
@@ -370,6 +428,8 @@ struct DubOptions: Sendable {
         static var diffusionSteps: String { String(diffusionStepsValue) }
         static let refDurationValue: TimeInterval = 15
         static var refDuration: String { String(Int(refDurationValue)) }
+        static let gapPauseValue: TimeInterval = 0.5
+        static var gapPause: String { String(gapPauseValue) }
     }
 
     init(parsing args: [String]) throws {
@@ -402,6 +462,25 @@ struct DubOptions: Sendable {
                 ttsEngine = .local          // clone the original speaker via indextts2
                 engineExplicit = true
             case "--voice":          cloudVoice = try value()
+            case "--edge-tts":       edgeTTSBinary = DubOptions.absolute(try value())
+            case "--fit-rate":
+                guard let v = Int(try value().trimmingCharacters(in: CharacterSet(charactersIn: "-%"))),
+                      v >= 1, v <= 50 else {
+                    throw CLIError("--fit-rate must be a slow-down percentage between 1 and 50 (e.g. 15)")
+                }
+                fitRateMax = v
+            case "--compress-gaps":
+                guard let v = Double(try value()), v > 1.0, v <= 8.0 else {
+                    throw CLIError("--compress-gaps must be a speed-up factor above 1 and at most 8 (e.g. 3)")
+                }
+                compressGaps = v
+            case "--gap-pause":
+                guard let v = Double(try value()), v >= 0, v <= 5 else {
+                    throw CLIError("--gap-pause must be between 0 and 5 seconds")
+                }
+                gapPause = v
+            case "--no-burn-subs":   burnSubtitles = false
+            case "--ffmpeg":         ffmpegPath = DubOptions.absolute(try value())
             case "--ref":
                 ref = try value()
                 if !engineExplicit { ttsEngine = .local }   // a voice reference implies cloning
@@ -478,5 +557,22 @@ struct DubOptions: Sendable {
     static func absolute(_ path: String, isDirectory: Bool = false) -> URL {
         let base = URL(fileURLWithPath: path, isDirectory: isDirectory)
         return base.standardizedFileURL
+    }
+
+    /// Resolve a command on PATH (`/usr/bin/which`), or nil if it isn't there.
+    static func which(_ command: String) -> URL? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [command]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return nil }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let path = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path)
     }
 }
