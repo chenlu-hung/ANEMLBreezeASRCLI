@@ -20,7 +20,7 @@ breeze-asr <input> [options]
 - Pipeline: FFmpeg extracts 16 kHz mono WAV → WhisperKit/Breeze-ASR-25 transcribes
   (VAD chunking) → SRT via SwiftSubtitles. No LLM, no burning.
 - Model resolution order: `--model-path` → `~/Library/Application Support/ANEMLBreezeASR/HubCache`
-  → `~/Library/Application Support/VibeTyping/HubCache` → download from
+  → `~/Library/Application Support/BreezeTyping/HubCache` → download from
   `aoiandroid/Breeze-ASR-25_coreml` (~3 GB, only if none cached).
 
 ## Dispatching correction to opencode
@@ -146,14 +146,14 @@ branch only.
   compile of the 1.2 GB encoder (~40 min), then ANECompilerService caches it per bundle-id
   (`breeze-asr`) under `~/Library/Caches/breeze-asr/com.apple.e5rt.e5bundlecache`; later
   loads take ~3 s. That cache is per-bundle-id, so a warm compile from another app (e.g.
-  VibeTyping) isn't inherited — only the `.mlmodelc` model files are shared. On a fresh
+  BreezeTyping) isn't inherited — only the `.mlmodelc` model files are shared. On a fresh
   machine, after a cache wipe, or if the bundle id changes, expect the ~40 min compile
   again; pass `--compute gpu` for an instant load when a warm ANE cache isn't available.
 - **"could not remove corrupted metadata file: config.json.metadata … permission"**: the
   Whisper tokenizer was being written to TCC-protected `~/Documents/huggingface`. The CLI
   pins `tokenizerFolder` to `~/Library/Application Support/ANEMLBreezeASR/HubCache` to
   avoid this. If it recurs, that cache dir may be unwritable.
-- **Model re-downloads despite VibeTyping having it**: the cache must match the canonical
+- **Model re-downloads despite BreezeTyping having it**: the cache must match the canonical
   `models/aoiandroid/Breeze-ASR-25_coreml/` layout with a real (>100 MB) AudioEncoder.
 - **Empty/garbled transcription**: pass the correct `-l` source language instead of `auto`.
 - **Multiple files competing for the ANE**: never run more than one `breeze-asr` process

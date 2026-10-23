@@ -77,7 +77,7 @@ Single executable target (`Sources/breeze-asr`), thin `@main` entry delegating t
   the first ANE run does a one-time cold compile of the 1.2 GB encoder that can take ~40 min, after
   which ANECompilerService caches it under the binary's bundle id (`breeze-asr`, in
   `~/Library/Caches/breeze-asr/com.apple.e5rt.e5bundlecache`) and later loads take ~3 s. That e5rt
-  cache is per-bundle-id, so VibeTyping's warm ANE compile can't be inherited — only the `.mlmodelc`
+  cache is per-bundle-id, so BreezeTyping's warm ANE compile can't be inherited — only the `.mlmodelc`
   model files are shared. **Gotcha:** on a fresh machine / after a cache wipe / if the bundle id
   changes, the first default run will look like a ~40 min hang — use `--compute gpu` for an instant
   load when a warm ANE cache isn't available.

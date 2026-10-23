@@ -10,7 +10,7 @@ import CoreML
 /// minutes (~40 min observed here); don't kill it. The
 /// result is cached by ANECompilerService under THIS binary's bundle id (`breeze-asr`), in
 /// `~/Library/Caches/breeze-asr/com.apple.e5rt.e5bundlecache`. That cache is keyed per bundle id,
-/// so VibeTyping's warm ANE compile can't be inherited (the `.mlmodelc` model files are shared,
+/// so BreezeTyping's warm ANE compile can't be inherited (the `.mlmodelc` model files are shared,
 /// the ANE bundle is not). Once warm, `.ane` loads in ~3 s.
 enum ComputeBackend: String, Sendable {
     case gpu
@@ -42,7 +42,7 @@ enum WhisperKitError: LocalizedError {
 }
 
 /// WhisperKit wrapper around the Breeze-ASR-25 CoreML model.
-/// Reuses a model already cached by the ANEMLBreezeASR GUI app or by VibeTyping
+/// Reuses a model already cached by the ANEMLBreezeASR GUI app or by BreezeTyping
 /// before downloading anything (so the skill never re-fetches the ~3 GB model).
 /// NOT @MainActor (unlike the GUI service): loading the CoreML model on the main
 /// thread of an async CLI deadlocks, since ANE completions need the main thread free.
@@ -73,7 +73,7 @@ final class WhisperKitService {
     private var candidateCaches: [URL] {
         [
             appSupportCache("ANEMLBreezeASR"),   // shared with the GUI app
-            appSupportCache("VibeTyping")        // shared with VibeTyping
+            appSupportCache("BreezeTyping")      // shared with BreezeTyping
         ]
     }
 

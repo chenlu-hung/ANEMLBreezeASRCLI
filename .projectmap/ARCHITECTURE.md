@@ -31,7 +31,7 @@ does timeline placement (default stretch-video) → FFmpeg mux.
 - **Compute units default to `.cpuAndNeuralEngine` (ANE); `--compute gpu` switches to `.cpuAndGPU`.**
   ANE wins on Apple silicon (NPU > GPU for this model). ANE is *not* a deadlock in this unsigned CLI
   — the first ANE run does a one-time ~40 min cold compile of the 1.2 GB encoder, then
-  ANECompilerService caches it per-bundle-id (`breeze-asr`) and later loads take ~3 s. VibeTyping's
+  ANECompilerService caches it per-bundle-id (`breeze-asr`) and later loads take ~3 s. BreezeTyping's
   warm ANE cache can't be inherited (e5rt cache is keyed per bundle id; only `.mlmodelc` files are
   shared). On a cold cache the first default run looks like a hang — use `--compute gpu` to skip it.
 - **Model cache reuse** before download: WhisperKit looks in app-support HubCaches and validates
