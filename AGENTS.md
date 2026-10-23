@@ -16,7 +16,7 @@ Re-run `/project-map update` after substantial changes.
 
 ## Build / test / run
 - Build: `swift build` (release: `swift build -c release` → `.build/release/breeze-asr`)
-- Prebuilt arm64 binary: GitHub release `v0.1.0` (`breeze-asr-macos-arm64-v0.1.0.tar.gz`, a bare
+- Prebuilt arm64 binary: GitHub release `v0.2.0` (`breeze-asr-macos-arm64-v0.2.0.tar.gz`, a bare
   `breeze-asr` executable — extract into `.build/release/`). Rebuild/re-release if `Sources/` changes.
 - Test: `swift test` — **no test target is defined yet**, so this is currently a no-op.
 - Transcribe: `breeze-asr <input> [-l zh] [-o out.srt]`

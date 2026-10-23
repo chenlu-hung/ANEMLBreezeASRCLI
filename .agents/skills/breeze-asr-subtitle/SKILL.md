@@ -22,7 +22,7 @@ ANEMLBreezeASRCLI repo root (the directory holding `AGENTS.md`).
 - CLI binary: `breeze-asr` on `PATH` (normally a `~/.local/bin/breeze-asr` symlink to the
   repo's `.build/release/breeze-asr`; otherwise use that full path). If missing, either download the prebuilt
   arm64 binary from the GitHub release (no Xcode toolchain needed):
-  `mkdir -p .build/release && gh release download v0.1.0 -R chenlu-hung/ANEMLBreezeASRCLI -p '*.tar.gz' -O - | tar xz -C .build/release`
+  `mkdir -p .build/release && gh release download v0.2.0 -R chenlu-hung/ANEMLBreezeASRCLI -p '*.tar.gz' -O - | tar xz -C .build/release`
   or build it: `swift build -c release` from the repo root (first build ~1 min).
 - FFmpeg on PATH (`brew install ffmpeg`). The Breeze model is reused from an existing
   ANEMLBreezeASR/VibeTyping cache — no download if either app already has it.

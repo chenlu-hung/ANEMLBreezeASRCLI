@@ -75,7 +75,7 @@ so put it on your `PATH` too). Either download the prebuilt one or build from so
 
 ```bash
 mkdir -p .build/release
-curl -L https://github.com/chenlu-hung/ANEMLBreezeASRCLI/releases/download/v0.1.0/breeze-asr-macos-arm64-v0.1.0.tar.gz \
+curl -L https://github.com/chenlu-hung/ANEMLBreezeASRCLI/releases/download/v0.2.0/breeze-asr-macos-arm64-v0.2.0.tar.gz \
   | tar xz -C .build/release
 xattr -d com.apple.quarantine .build/release/breeze-asr 2>/dev/null  # only if downloaded via a browser
 ```
